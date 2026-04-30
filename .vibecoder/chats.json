@@ -264,5 +264,166 @@
         "role": "SYSTEM",
         "content": "Запрос ИИ-коммита...",
         "hidden_data": ""
+    },
+    {
+        "id": "1925e641-9521-4899-a750-99b59ea3f789",
+        "timestamp": 1777553802.5614808,
+        "role": "SYSTEM",
+        "content": "Ручные правки в proba3.py утверждены и сохранены!",
+        "hidden_data": ""
+    },
+    {
+        "id": "e2a1d434-43e7-47bb-91e8-60f8dd9a8f99",
+        "timestamp": 1777553808.2637515,
+        "role": "SYSTEM",
+        "content": "Запрос ИИ-коммита...",
+        "hidden_data": ""
+    },
+    {
+        "id": "738b2421-73b1-4e7d-8b2e-a59aaa5eb30b",
+        "timestamp": 1777554028.9126992,
+        "role": "SYSTEM",
+        "content": "Ручные правки в proba3.py утверждены и сохранены!",
+        "hidden_data": ""
+    },
+    {
+        "id": "9b2e8422-222c-430d-8c19-bbdeedb0ae98",
+        "timestamp": 1777554037.7594123,
+        "role": "SYSTEM",
+        "content": "Запрос ИИ-коммита...",
+        "hidden_data": ""
+    },
+    {
+        "id": "e29cf5ad-9845-4e73-9c6d-e45ee6ed4c46",
+        "timestamp": 1777554071.534394,
+        "role": "SYSTEM",
+        "content": "Запрос ИИ-коммита...",
+        "hidden_data": ""
+    },
+    {
+        "id": "f846e623-51fb-45d3-a349-5133f3593efc",
+        "timestamp": 1777554087.9301972,
+        "role": "USER",
+        "content": "привет, ты готов к работе?",
+        "hidden_data": ""
+    },
+    {
+        "id": "8dabffee-e6f1-4b0d-b2b3-4442d7f787c5",
+        "timestamp": 1777554087.9461691,
+        "role": "SYSTEM",
+        "content": "Задача отправлена. Ожидание ответа...",
+        "hidden_data": ""
+    },
+    {
+        "id": "d6668616-2d75-49b7-88fd-f89d04654991",
+        "timestamp": 1777554158.0637846,
+        "role": "SYSTEM",
+        "content": "⏸ РАБОТА ПРИОСТАНОВЛЕНА",
+        "hidden_data": ""
+    },
+    {
+        "id": "28feb30b-48ca-4616-bd68-7f443a0b0af9",
+        "timestamp": 1777554171.4521434,
+        "role": "SYSTEM",
+        "content": "▶ РАБОТА ВОЗОБНОВЛЕНА",
+        "hidden_data": ""
+    },
+    {
+        "id": "b53617d8-b8e4-47e4-855a-47aab11cb259",
+        "timestamp": 1777554173.2599418,
+        "role": "USER",
+        "content": "привет, ты готов к работе?",
+        "hidden_data": ""
+    },
+    {
+        "id": "4ec31721-f466-429f-a1e4-48a58c1cdfd8",
+        "timestamp": 1777554173.2753172,
+        "role": "SYSTEM",
+        "content": "Задача отправлена. Ожидание ответа...",
+        "hidden_data": ""
+    },
+    {
+        "id": "1255eb0c-43ee-40d0-823f-5d14c1659736",
+        "timestamp": 1777573601.976303,
+        "role": "USER",
+        "content": "ты готов к работе?",
+        "hidden_data": ""
+    },
+    {
+        "id": "dd80fdb5-0f74-4511-be28-0d6583951d26",
+        "timestamp": 1777573601.9926498,
+        "role": "SYSTEM",
+        "content": "Задача отправлена. Ожидание ответа...",
+        "hidden_data": ""
+    },
+    {
+        "id": "38f6b6bc-06aa-46c7-bfa0-e474a68d5ad8",
+        "timestamp": 1777573712.7656798,
+        "role": "USER",
+        "content": "ты готов к работе?",
+        "hidden_data": ""
+    },
+    {
+        "id": "59781441-7c19-4d41-b678-45d9182c4e68",
+        "timestamp": 1777573712.7824686,
+        "role": "SYSTEM",
+        "content": "Задача отправлена. Ожидание ответа...",
+        "hidden_data": ""
+    },
+    {
+        "id": "c1df87c6-bcf9-4b5f-90ed-a2d87c17034f",
+        "timestamp": 1777573731.914329,
+        "role": "AI",
+        "content": "Я готов к работе. Ожидаю постановки задачи с описанием того, что нужно сделать или исправить.",
+        "hidden_data": ""
+    },
+    {
+        "id": "16611a1e-e829-480f-ad78-7b5d1bf9cf9b",
+        "timestamp": 1777573738.5151985,
+        "role": "SYSTEM",
+        "content": "Запрос ИИ-коммита...",
+        "hidden_data": ""
+    },
+    {
+        "id": "cb784bd6-3741-481f-8004-8235207bf12b",
+        "timestamp": 1777573765.9918497,
+        "role": "SYSTEM",
+        "content": "Ручные правки в proba утверждены и сохранены!",
+        "hidden_data": ""
+    },
+    {
+        "id": "3a256d94-6612-45e0-a23a-62e83856dacd",
+        "timestamp": 1777573771.2158198,
+        "role": "SYSTEM",
+        "content": "Запрос ИИ-коммита...",
+        "hidden_data": ""
+    },
+    {
+        "id": "3bf24cc8-c484-445d-9231-b10d8d7ee880",
+        "timestamp": 1777573812.9229288,
+        "role": "AI",
+        "content": "chore: обновление тестовых файлов proba и proba3.py, фиксация логов чата и локальной истории",
+        "hidden_data": ""
+    },
+    {
+        "id": "96196bf3-2c61-4f91-b89f-504c2352d1c3",
+        "timestamp": 1777573831.2614052,
+        "role": "SYSTEM",
+        "content": "Ручные правки в proba утверждены и сохранены!",
+        "hidden_data": ""
+    },
+    {
+        "id": "a980fe4a-72c8-4f5e-a275-274a01020884",
+        "timestamp": 1777573837.8905861,
+        "role": "SYSTEM",
+        "content": "Запрос ИИ-коммита...",
+        "hidden_data": ""
+    },
+    {
+        "id": "f8d7c03e-e656-4fc8-80bd-8a2981d5a814",
+        "timestamp": 1777573884.9269,
+        "role": "AI",
+        "content": "chore: добавление тестовых строк в proba и proba3.py, обновление логов чата и локальных бэкапов",
+        "hidden_data": ""
     }
 ]
