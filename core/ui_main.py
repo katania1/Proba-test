@@ -6,9 +6,10 @@ from PyQt6.QtCore import Qt, QDir, QUrl, QSettings, QEvent, QTimer
 from PyQt6.QtGui import QShortcut, QKeySequence
 
 from core.editor import DarkPythonEditor
-from core.ai_controller import AIController # <--- НОВОЕ: Наш мозг
+from core.ai_controller import AIController
+from core.code_applier import CodeApplier  # <--- Подключили Хирурга
+from core.git_workflow import GitWorkflow  # <--- Подключили Диспетчера
 from core.file_ops import FileManager
-from core.diff_viewer import DiffDialog
 from core.chat_logger import ChatLogger
 from core.history_viewer import HistoryDialog
 
@@ -16,13 +17,12 @@ from core.custom_widgets import TagHighlighter, VibeTextEdit, VibeChatBrowser
 from core.file_explorer import FileExplorerWidget
 from core.time_machine import TimeMachineDialog
 from core.git_manager import GitManager
-from core.git_dialog import GitDialog
 from core.api_settings_dialog import APISettingsDialog
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("VibeCoder v1.16 — MVC Edition (Smart Tabs & AI Anchor)")
+        self.setWindowTitle("VibeCoder v1.17 — Ultimate MVC Edition")
         
         self.settings = QSettings("VibeCoder", "Preferences")
         self.attached_files = set()
@@ -188,7 +188,6 @@ class MainWindow(QMainWindow):
         self.btn_git.setToolTip("Управление версиями (Git)")
         self.btn_git.setFixedHeight(35)
         self.btn_git.setStyleSheet("background-color: #4a148c; color: white; font-weight: bold; border-radius: 4px;")
-        self.btn_git.clicked.connect(self.open_git_dialog)
 
         self.btn_api = QPushButton("⚙️ API")
         self.btn_api.setToolTip("Настройки API (Ключи и Провайдеры)")
@@ -201,13 +200,11 @@ class MainWindow(QMainWindow):
         self.btn_reject_main.setFixedHeight(35)
         self.btn_reject_main.setStyleSheet("background-color: #512525; color: white; font-weight: bold; border-radius: 4px;")
         self.btn_reject_main.setVisible(False)
-        self.btn_reject_main.clicked.connect(self.reject_preview)
         
         self.btn_approve = QPushButton("✅ Утвердить код")
         self.btn_approve.setToolTip("Открыть окно ревью (Diff)")
         self.btn_approve.setFixedHeight(35)
         self.btn_approve.setStyleSheet("background-color: #2e7d32; color: white; font-weight: bold; border-radius: 4px;") 
-        self.btn_approve.clicked.connect(self.review_and_approve)
         
         bottom_btn_layout.addWidget(self.btn_send, 2)
         bottom_btn_layout.addWidget(self.btn_pause, 2)
@@ -227,19 +224,40 @@ class MainWindow(QMainWindow):
         self.retry_count = 0        
         self.memory_old_code = None 
 
-        self.shortcut_save = QShortcut(QKeySequence("Ctrl+S"), self)
-        self.shortcut_save.activated.connect(self.manual_save)
+        # --- ИНИЦИАЛИЗАЦИЯ НОВЫХ МОДУЛЕЙ АРХИТЕКТУРЫ ---
+        self.code_applier = CodeApplier(self)
+        self.git_workflow = GitWorkflow(self)
         
-        # --- ИНИЦИАЛИЗАЦИЯ И ПОДКЛЮЧЕНИЕ МОЗГА (AI Controller) ---
+        self.shortcut_save = QShortcut(QKeySequence("Ctrl+S"), self)
+        self.shortcut_save.activated.connect(self.code_applier.manual_save)
+        self.btn_approve.clicked.connect(self.code_applier.review_and_approve)
+        self.btn_reject_main.clicked.connect(self.code_applier.reject_preview)
+        
+        self.btn_git.clicked.connect(self.git_workflow.open_git_dialog)
+        
         self.ai_controller = AIController(self)
         self.ai_controller.start()
         
         self.btn_send.clicked.connect(self.ai_controller.send_task)
         self.prompt_input.send_signal.connect(self.ai_controller.send_task)
         self.btn_relay.clicked.connect(self.ai_controller.force_relay)
-        # -----------------------------------------------------------
-        
+        # -----------------------------------------------
+
         self.update_git_status()
+
+    # --- ПРОКСИ-МЕТОДЫ (Связки для AIController) ---
+    def is_path_safe(self, file_path):
+        return self.code_applier.is_path_safe(file_path)
+
+    def get_file_content_safe(self, rel_path):
+        return self.code_applier.get_file_content_safe(rel_path)
+
+    def update_git_status(self):
+        self.git_workflow.update_git_status()
+
+    def open_git_dialog(self, prefill_msg=""):
+        self.git_workflow.open_git_dialog(prefill_msg)
+    # -----------------------------------------------
 
     def get_current_target_id(self):
         selected_tab = self.combo_tabs.currentText()
@@ -306,131 +324,10 @@ class MainWindow(QMainWindow):
                     self.editor.setText(f.read())
             self.update_git_status()
 
-    def is_path_safe(self, file_path):
-        abs_project = os.path.abspath(self.project_path)
-        abs_file = os.path.abspath(os.path.join(self.project_path, file_path))
-        return os.path.commonpath([abs_project]) == os.path.commonpath([abs_project, abs_file])
-
-    def get_file_content_safe(self, rel_path):
-        if not self.is_path_safe(rel_path): 
-            return None
-        abs_path = os.path.abspath(os.path.join(self.project_path, rel_path))
-        if os.path.isfile(abs_path):
-            try:
-                with open(abs_path, 'r', encoding='utf-8') as f:
-                    return f.read()
-            except Exception:
-                pass
-        return None
-
     def handle_tag_action(self, filename, is_attach):
         if is_attach: self.attached_files.add(filename)
         else: self.attached_files.discard(filename)
         self.prompt_input.highlighter.rehighlight()
-
-    def manual_save(self):
-        if not self.current_file_path: return
-        current_text = self.editor.text()
-        with open(self.current_file_path, 'r', encoding='utf-8') as f:
-            old_text = f.read()
-        if current_text.replace('\r\n', '\n') != old_text.replace('\r\n', '\n'):
-            self.file_manager.save_file(self.current_file_path, current_text) 
-            self.log_system(f"Ручное сохранение: {os.path.basename(self.current_file_path)}", color="#31a24c")
-            self.show_popup("Сохранено", f"Файл сохранен.\nСоздан бэкап в Машине Времени.")
-            self.update_git_status()
-
-    def review_and_approve(self):
-        if self.proposed_updates:
-            update = self.proposed_updates[0] 
-            rel_path = update.get("file_path", "")
-            new_code = update.get("code", "")
-            abs_path = os.path.abspath(os.path.join(self.project_path, rel_path))
-            
-            old_code = ""
-            if os.path.exists(abs_path):
-                with open(abs_path, 'r', encoding='utf-8') as f:
-                    old_code = f.read()
-                    
-            dialog = DiffDialog(self, old_code, new_code, f"{rel_path} (Файл 1 из {len(self.proposed_updates)})")
-            
-            if dialog.exec() == QDialog.DialogCode.Accepted:
-                self.file_manager.save_file(abs_path, new_code)
-                if self.current_file_path and os.path.normpath(self.current_file_path) == os.path.normpath(abs_path):
-                    self.editor.setText(new_code)
-                self.log_system(f"Изменения от ИИ в {rel_path} сохранены!", color="#2e7d32")
-                self.update_git_status()
-                self.proposed_updates.pop(0)
-                
-                if self.proposed_updates:
-                    self.btn_approve.setText(f"✅ Ревью (Осталось: {len(self.proposed_updates)})")
-                else:
-                    self.btn_reject_main.setVisible(False)
-                    self.btn_approve.setText("✅ Утвердить код")
-            else:
-                self.reject_preview()
-            return
-            
-        if self.current_file_path:
-            current_text = self.editor.text()
-            with open(self.current_file_path, 'r', encoding='utf-8') as f:
-                old_text = f.read()
-            if current_text.replace('\r\n', '\n') != old_text.replace('\r\n', '\n'):
-                rel_path = os.path.basename(self.current_file_path)
-                dialog = DiffDialog(self, old_text, current_text, rel_path + " (Ручные правки)")
-                if dialog.exec() == QDialog.DialogCode.Accepted:
-                    self.file_manager.save_file(self.current_file_path, current_text)
-                    self.log_system(f"Ручные правки в {rel_path} утверждены и сохранены!", color="#2e7d32")
-                    self.update_git_status()
-                return
-
-        self.show_popup("Пусто", "Нет изменений для утверждения.")
-
-    def reject_preview(self):
-        if self.memory_old_code is not None:
-            self.editor.setText(self.memory_old_code)
-            self.memory_old_code = None
-        self.proposed_updates = []
-        self.btn_reject_main.setVisible(False)
-        self.btn_approve.setText("✅ Утвердить код")
-        self.log_system("Предпросмотр отклонен.", color="#ff4444")
-
-    def update_git_status(self):
-        if not self.git_manager.is_repo():
-            self.btn_git.setText("📦 Git (Инициализировать)")
-            self.btn_git.setStyleSheet("background-color: #4a148c; color: white; font-weight: bold; border-radius: 4px;")
-            return
-        status_count = self.git_manager.get_status()
-        if status_count == -1:
-            self.btn_git.setText("📦 Git (Ошибка)")
-        elif status_count == 0:
-            self.btn_git.setText("📦 Git (Чисто)")
-            self.btn_git.setStyleSheet("background-color: #252526; color: #888888; font-weight: bold; border-radius: 4px;")
-        else:
-            self.btn_git.setText(f"📦 Git (Изменено: {status_count})")
-            self.btn_git.setStyleSheet("background-color: #e65100; color: white; font-weight: bold; border-radius: 4px;")
-
-    def open_git_dialog(self, prefill_msg=""):
-        if not self.git_manager.is_repo():
-            reply = QMessageBox.question(self, "Git", "В этой папке нет Git-репозитория. Инициализировать сейчас?",
-                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            if reply == QMessageBox.StandardButton.Yes:
-                success, msg = self.git_manager.init_repo()
-                if success:
-                    self.log_system("Git репозиторий инициализирован!", color="#31a24c")
-                    self.update_git_status()
-                else:
-                    self.show_popup("Ошибка", f"Не удалось инициализировать Git:\n{msg}", is_error=True)
-            return
-
-        self.current_git_dialog = GitDialog(self, self.git_manager)
-        if prefill_msg:
-            self.current_git_dialog.text_input.setPlainText(prefill_msg)
-        self.current_git_dialog.exec()
-        self.current_git_dialog = None
-
-    def request_ai_commit_message(self, diff_text):
-        # Делегируем запрос на коммит в Контроллер
-        self.ai_controller.request_ai_commit_message(diff_text)
 
     def handle_chat_link(self, url: QUrl):
         if url.scheme() == "relay":
@@ -490,7 +387,6 @@ class MainWindow(QMainWindow):
         scrollbar = self.chat_history.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
-    # --- УМНОЕ ОБНОВЛЕНИЕ КОМБОБОКСА (ФИКС "ПРЫЖКОВ") ---
     def update_tabs_ui(self):
         if not hasattr(self, 'ai_controller') or not hasattr(self.ai_controller.bridge, 'get_active_tabs'):
             return
@@ -498,12 +394,11 @@ class MainWindow(QMainWindow):
         tabs = self.ai_controller.bridge.get_active_tabs()
         current_id = self.get_current_target_id()
         
-        # Сравниваем списки, чтобы не дергать UI лишний раз
         new_items = ["🔴 Нет связи"] if not tabs else [f"🟢 {t}" for t in tabs]
         current_items = [self.combo_tabs.itemText(i) for i in range(self.combo_tabs.count())]
         
         if new_items == current_items:
-            return # Списки идентичны! Ничего не трогаем, фокус не сбрасывается.
+            return 
             
         self.combo_tabs.blockSignals(True)
         self.combo_tabs.clear()
@@ -511,7 +406,6 @@ class MainWindow(QMainWindow):
         self.combo_tabs.setEnabled(bool(tabs))
         self.combo_tabs.addItems(new_items)
             
-        # Пытаемся восстановить выбор по ID, игнорируя мелкие изменения в названии вкладки
         if current_id:
             for i in range(self.combo_tabs.count()):
                 if f"[{current_id}]" in self.combo_tabs.itemText(i):
