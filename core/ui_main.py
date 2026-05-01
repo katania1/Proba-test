@@ -420,39 +420,50 @@ class MainWindow(QMainWindow):
             return
             
         raw_tabs = self.ai_controller.bridge.get_active_tabs()
-        tabs = sorted(raw_tabs) if raw_tabs else []
 
-        new_items = ["🔴 Нет связи"] if not tabs else [f"🟢 {t}" for t in tabs]
-        current_items = [self.combo_tabs.itemText(i) for i in range(self.combo_tabs.count())]
-        
-        # --- ГЕНИАЛЬНЫЙ ФИКС: Сравниваем только ID, полностью игнорируя названия! ---
-        def get_ids(items_list):
-            ids = []
-            for item in items_list:
-                if "[" in item and "]" in item:
-                    ids.append(item.split("[")[-1].split("]")[0])
-                else:
-                    ids.append(item) # Для "Нет связи"
-            return ids
+        if not raw_tabs:
+            if self.combo_tabs.count() != 1 or self.combo_tabs.itemText(0) != "🔴 Нет связи":
+                self.combo_tabs.blockSignals(True)
+                self.combo_tabs.clear()
+                self.combo_tabs.addItem("🔴 Нет связи")
+                self.combo_tabs.blockSignals(False)
+            return
 
-        if get_ids(new_items) == get_ids(current_items):
-            return # Вкладки те же самые. Игнорируем смену заголовков браузера!
-        # ----------------------------------------------------------------------------
-            
+        # Собираем актуальные вкладки в словарь {ID: Полный_текст}
+        new_tabs_dict = {}
+        for t in raw_tabs:
+            if "[" in t and "]" in t:
+                t_id = t.split("[")[-1].split("]")[0]
+                new_tabs_dict[t_id] = f"🟢 {t}"
+
         self.combo_tabs.blockSignals(True)
-        
-        # Удаляем лишние элементы с конца, если список уменьшился
-        while self.combo_tabs.count() > len(new_items):
-            self.combo_tabs.removeItem(self.combo_tabs.count() - 1)
-            
-        # Обновляем существующие строчки или добавляем новые
-        for i, text in enumerate(new_items):
-            if i < self.combo_tabs.count():
-                self.combo_tabs.setItemText(i, text)
-            else:
-                self.combo_tabs.addItem(text)
-            
-        # Строго восстанавливаем заблокированный ID из памяти
+
+        # 1. Удаляем то, чего больше нет (закрытые вкладки)
+        i = 0
+        while i < self.combo_tabs.count():
+            item_text = self.combo_tabs.itemText(i)
+            if item_text == "🔴 Нет связи":
+                self.combo_tabs.removeItem(i)
+                continue
+
+            if "[" in item_text and "]" in item_text:
+                item_id = item_text.split("[")[-1].split("]")[0]
+                if item_id not in new_tabs_dict:
+                    self.combo_tabs.removeItem(i)
+                    continue
+                else:
+                    # Вкладка на месте! Просто тихо обновляем текст (если Gemini печатает)
+                    if item_text != new_tabs_dict[item_id]:
+                        self.combo_tabs.setItemText(i, new_tabs_dict[item_id])
+                    # Удаляем из словаря, чтобы не добавить как новую
+                    del new_tabs_dict[item_id]
+            i += 1
+
+        # 2. Добавляем абсолютно новые вкладки (если вы открыли новую в браузере)
+        for t_id, t_text in new_tabs_dict.items():
+            self.combo_tabs.addItem(t_text)
+
+        # 3. Жестко держим фокус
         if self.locked_tab_id:
             for i in range(self.combo_tabs.count()):
                 if f"[{self.locked_tab_id}]" in self.combo_tabs.itemText(i):
@@ -464,5 +475,5 @@ class MainWindow(QMainWindow):
                 text = self.combo_tabs.itemText(0)
                 if "[" in text and "]" in text:
                     self.locked_tab_id = text.split("[")[-1].split("]")[0]
-                    
+
         self.combo_tabs.blockSignals(False)

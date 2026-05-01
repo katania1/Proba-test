@@ -19,3 +19,5 @@ proba3.py
 proba
 
 proba1.py
+__pycache__/
+*.pyc
