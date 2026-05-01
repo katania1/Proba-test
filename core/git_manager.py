@@ -6,147 +6,150 @@ class GitManager:
         self.project_path = project_path
 
     def run_git(self, *args):
-        """Выполняет консольную команду git и возвращает результат"""
         try:
             startupinfo = None
             if os.name == 'nt':
                 startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
 
+            # НОВОЕ: Заставляем Git нормально читать русские названия папок и файлов!
+            full_args = ['git', '-c', 'core.quotePath=false'] + list(args)
+
             result = subprocess.run(
-                ['git'] + list(args),
+                full_args,
                 cwd=self.project_path,
-                capture_output=True,
-                text=True,
-                check=True,
-                startupinfo=startupinfo,
-                encoding='utf-8'
+                capture_output=True, text=True, check=True,
+                startupinfo=startupinfo, encoding='utf-8'
             )
             return True, result.stdout.strip()
-        except subprocess.CalledProcessError as e:
-            return False, e.stderr.strip()
-        except FileNotFoundError:
-            return False, "GIT_NOT_INSTALLED"
+        except subprocess.CalledProcessError as e: return False, e.stderr.strip()
+        except FileNotFoundError: return False, "GIT_NOT_INSTALLED"
 
     def is_repo(self):
-        """Проверяет, инициализирован ли git в папке"""
         return os.path.exists(os.path.join(self.project_path, '.git'))
 
     def ensure_gitignore(self):
-        """Создает файл .gitignore, чтобы скрыть мусор от коммитов"""
         gitignore_path = os.path.join(self.project_path, '.gitignore')
-        
-        # Стандартные правила для VibeCoder и Python
-        rules = [
-            "# VibeCoder",
-            ".vibecoder/",
-            ".vibe_backups/",
-            "__pycache__/",
-            "*.pyc",
-            "# Python Virtual Environment",
-            "venv/",
-            "env/",
-            ".env"
-        ]
-        
-        # Если файла нет, создаем его со стандартными правилами
+        rules = ["# VibeCoder", ".vibecoder/", ".vibe_backups/", "__pycache__/", "*.pyc", "venv/", "env/", ".env"]
         if not os.path.exists(gitignore_path):
-            with open(gitignore_path, 'w', encoding='utf-8') as f:
-                f.write("\n".join(rules) + "\n")
+            with open(gitignore_path, 'w', encoding='utf-8') as f: f.write("\n".join(rules) + "\n")
             return True
-            
-        # Если файл есть, проверяем, есть ли там наши ключевые папки
         try:
-            with open(gitignore_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-                
+            with open(gitignore_path, 'r', encoding='utf-8') as f: content = f.read()
             missing_rules = [r for r in rules if r not in content and not r.startswith("#")]
-            
             if missing_rules:
                 with open(gitignore_path, 'a', encoding='utf-8') as f:
-                    f.write("\n\n# Auto-added by VibeCoder\n")
-                    f.write("\n".join(missing_rules) + "\n")
+                    f.write("\n\n# Auto-added by VibeCoder\n" + "\n".join(missing_rules) + "\n")
                 return True
-        except Exception:
-            pass
-            
+        except Exception: pass
         return False
 
     def init_repo(self):
-        """Инициализирует пустой репозиторий и сразу настраивает gitignore"""
         success, msg = self.run_git('init')
-        if success:
-            self.ensure_gitignore()
+        if success: self.ensure_gitignore()
         return success, msg
 
     def get_status(self):
-        """Получает список измененных файлов (игнорируя те, что в .gitignore)"""
-        # Сначала убедимся, что игнор настроен (на случай если папку создали до этого)
-        if self.is_repo():
-            self.ensure_gitignore()
-            
+        if self.is_repo(): self.ensure_gitignore()
         success, output = self.run_git('status', '--porcelain')
-        if not success:
-            return -1
+        return len(output.split('\n')) if success and output else (0 if success else -1)
 
-        if not output:
-            return 0
+    def get_changed_files(self):
+        if not self.is_repo(): return []
+        success, output = self.run_git('status', '--porcelain')
+        return [line[3:].strip('"') for line in output.split('\n') if len(line) > 3] if success and output else []
 
-        return len(output.split('\n'))
+    def get_all_tracked_files(self):
+        if not self.is_repo(): return []
+        success, output = self.run_git('ls-files')
+        return [line.strip() for line in output.split('\n') if line.strip()] if success and output else []
 
-    def get_diff(self):
-        """Получает разницу кода для генерации описания ИИ"""
-        self.run_git('add', '-N', '.') 
-        success, output = self.run_git('diff')
+    def get_diff_for_files(self, files):
+        if not files: return ""
+        diff_files = []
+        for f in files:
+            abs_path = os.path.join(self.project_path, f)
+            # Добавляем в предпросмотр только если файл реально существует
+            if os.path.exists(abs_path):
+                self.run_git('add', '-N', '--force', '--', f)
+            diff_files.append(f)
+            
+        success, output = self.run_git('diff', '--', *diff_files)
         return output if success else ""
 
-    def commit_all(self, message):
-        """Добавляет все файлы (кроме проигнорированных) и делает коммит"""
-        add_success, add_err = self.run_git('add', '.')
-        if not add_success:
-            return False, f"Ошибка git add: {add_err}"
-            
+    def commit_selected(self, message, files):
+        if not files: return False, "Не выбрано ни одного файла."
+        self.run_git('reset')
+        for f in files:
+            abs_path = os.path.join(self.project_path, f)
+            if os.path.exists(abs_path):
+                # Если файл есть - добавляем
+                add_success, add_err = self.run_git('add', '--force', '--', f)
+                if not add_success: return False, f"Ошибка добавления файла {f}: {add_err}"
+            else:
+                # Если файла нет (удален) - безопасно вычищаем его из памяти Git
+                self.run_git('rm', '--cached', '--ignore-unmatch', '--', f)
+                
         commit_success, commit_err = self.run_git('commit', '-m', message)
-        if not commit_success:
-            return False, f"Ошибка git commit: {commit_err}"
-            
+        if not commit_success: return False, f"Ошибка git commit: {commit_err}"
         return True, "Коммит успешно создан!"
 
     # ==========================================
-    # НОВЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ С GITHUB (ОБЛАКОМ)
+    # РАБОТА С ИСТОРИЕЙ ВЕРСИЙ (GIT TIMELINE)
+    # ==========================================
+
+    def get_file_history(self, file_path):
+        success, output = self.run_git('log', '--pretty=format:%h|%ad|%s', '--date=short', '--', file_path)
+        if not success or not output: return []
+        history = []
+        for line in output.split('\n'):
+            parts = line.split('|', 2)
+            if len(parts) == 3:
+                history.append({'hash': parts[0], 'date': parts[1], 'message': parts[2]})
+        return history
+
+    def get_file_content_at_commit(self, file_path, commit_hash):
+        unix_path = file_path.replace('\\', '/')
+        success, output = self.run_git('show', f'{commit_hash}:{unix_path}')
+        return output if success else f"Не удалось прочитать файл:\n{output}"
+
+    def get_commit_diff(self, file_path, commit_hash):
+        success, output = self.run_git('show', '--format=', '--patch', commit_hash, '--', file_path)
+        return output if success else ""
+
+    def restore_file_to_commit(self, file_path, commit_hash):
+        success, output = self.run_git('checkout', commit_hash, '--', file_path)
+        return success, output
+
+    # ==========================================
+    # GITHUB (ОБЛАКО)
     # ==========================================
     
     def get_remote_url(self):
-        """Проверяет, подключен ли удаленный репозиторий (origin)"""
         success, output = self.run_git('remote', 'get-url', 'origin')
         return output if success else None
 
     def set_remote_url(self, url):
-        """Подключает удаленный репозиторий GitHub"""
-        # Если origin уже есть, меняем его (set-url), иначе добавляем (add)
-        if self.get_remote_url():
-            return self.run_git('remote', 'set-url', 'origin', url)
-        else:
-            return self.run_git('remote', 'add', 'origin', url)
+        return self.run_git('remote', 'set-url', 'origin', url) if self.get_remote_url() else self.run_git('remote', 'add', 'origin', url)
 
     def get_current_branch(self):
-        """Получает название текущей ветки (обычно main или master)"""
         success, output = self.run_git('branch', '--show-current')
         return output if success else "main"
 
     def push_to_cloud(self):
-        """Отправляет коммиты на GitHub"""
-        branch = self.get_current_branch()
-        # Ключ -u нужен для связывания локальной и удаленной ветки при первом пуше
-        success, output = self.run_git('push', '-u', 'origin', branch)
-        if not success:
-            return False, output
-        return True, "Код успешно отправлен в облако!"
+        success, output = self.run_git('push', '-u', 'origin', self.get_current_branch())
+        return (True, "Код отправлен в облако!") if success else (False, output)
 
     def pull_from_cloud(self):
-        """Скачивает изменения с GitHub (Синхронизация)"""
+        success, output = self.run_git('pull', 'origin', self.get_current_branch())
+        return (True, "Код скачан из облака!") if success else (False, output)
+
+    def pull_specific_files(self, files):
+        if not files: return False, "Файлы не выбраны."
         branch = self.get_current_branch()
-        success, output = self.run_git('pull', 'origin', branch)
-        if not success:
-            return False, output
-        return True, "Код успешно скачан из облака!"
+        fetch_success, fetch_err = self.run_git('fetch', 'origin', branch)
+        if not fetch_success: return False, f"Ошибка fetch: {fetch_err}"
+            
+        args = ['checkout', f'origin/{branch}', '--'] + files
+        checkout_success, checkout_err = self.run_git(*args)
+        return (True, f"Извлечено {len(files)} файлов!") if checkout_success else (False, f"Ошибка извлечения: {checkout_err}")

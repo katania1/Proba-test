@@ -2,7 +2,7 @@ import os
 import re
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QSplitter, 
                              QVBoxLayout, QPushButton, QMessageBox, QDialog, 
-                             QStatusBar, QTabWidget, QTextBrowser, QComboBox, QLabel)
+                             QStatusBar, QTabWidget, QTextBrowser, QComboBox, QLabel, QApplication)
 from PyQt6.QtCore import Qt, QDir, pyqtSignal, QUrl, QSettings, QEvent, QTimer
 from PyQt6.QtGui import QFileSystemModel, QShortcut, QKeySequence
 
@@ -14,12 +14,13 @@ from core.diff_viewer import DiffDialog
 from core.chat_logger import ChatLogger
 from core.history_viewer import HistoryDialog
 
-# ИМПОРТИРУЕМ НАШИ НОВЫЕ МОДУЛИ
+# Импорт кастомных виджетов и окон
 from core.custom_widgets import TagHighlighter, VibeTextEdit, VibeChatBrowser
 from core.file_explorer import FileExplorerWidget
 from core.time_machine import TimeMachineDialog
 from core.git_manager import GitManager
 from core.git_dialog import GitDialog
+from core.api_settings_dialog import APISettingsDialog
 
 class MainWindow(QMainWindow):
     ai_response_signal = pyqtSignal(str)
@@ -27,11 +28,16 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("VibeCoder v1.14 — Pro Edition (Smart Git)")
+        self.setWindowTitle("VibeCoder v1.15 — Pro Edition (Smart Git & API)")
         
         self.settings = QSettings("VibeCoder", "Preferences")
         self.attached_files = set()
         self.last_full_prompt = ""
+        self.current_git_dialog = None
+        
+        # Флаги состояния для перехвата ответов ИИ
+        self.is_waiting_for_commit_msg = False
+        self.is_waiting_for_relay_msg = False
         
         self.setStyleSheet("""
             QToolTip { background-color: #252526; color: #d4d4d4; border: 1px solid #569cd6; border-radius: 4px; padding: 5px; font-size: 13px; }
@@ -68,7 +74,7 @@ class MainWindow(QMainWindow):
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         
-        # --- ИНДИКАТОР ВКЛАДОК (СЕРДЦЕБИЕНИЕ) ---
+        # Индикатор вкладок
         status_container = QWidget()
         status_layout = QHBoxLayout(status_container)
         status_layout.setContentsMargins(5, 0, 10, 0)
@@ -90,7 +96,6 @@ class MainWindow(QMainWindow):
         self.tab_timer = QTimer(self)
         self.tab_timer.timeout.connect(self.update_tabs_ui)
         self.tab_timer.start(2000)
-        # ----------------------------------------
         
         self.tokens_sent = 0
         self.tokens_received = 0
@@ -196,17 +201,22 @@ class MainWindow(QMainWindow):
         self.btn_history.clicked.connect(self.show_history)
         
         self.btn_relay = QPushButton("🔄")
-        self.btn_relay.setToolTip("Сформировать эстафету")
+        self.btn_relay.setToolTip("Сформировать ИИ-Эстафету (Транзитный пакет)")
         self.btn_relay.setFixedHeight(35)
         self.btn_relay.setStyleSheet("background-color: #005f73; color: white; font-size: 16px; border-radius: 4px;")
         self.btn_relay.clicked.connect(self.force_relay)
         
-        # --- НОВАЯ КНОПКА GIT ---
         self.btn_git = QPushButton("📦 Git")
         self.btn_git.setToolTip("Управление версиями (Git)")
         self.btn_git.setFixedHeight(35)
         self.btn_git.setStyleSheet("background-color: #4a148c; color: white; font-weight: bold; border-radius: 4px;")
         self.btn_git.clicked.connect(self.open_git_dialog)
+
+        self.btn_api = QPushButton("⚙️ API")
+        self.btn_api.setToolTip("Настройки API (Ключи и Провайдеры)")
+        self.btn_api.setFixedHeight(35)
+        self.btn_api.setStyleSheet("background-color: #333333; color: white; font-weight: bold; border-radius: 4px;")
+        self.btn_api.clicked.connect(self.open_api_settings)
         
         self.btn_reject_main = QPushButton("❌ Отклонить")
         self.btn_reject_main.setToolTip("Отклонить предложенный код")
@@ -226,6 +236,7 @@ class MainWindow(QMainWindow):
         bottom_btn_layout.addWidget(self.btn_history, 1)
         bottom_btn_layout.addWidget(self.btn_relay, 1)
         bottom_btn_layout.addWidget(self.btn_git, 2)
+        bottom_btn_layout.addWidget(self.btn_api, 1)
         bottom_btn_layout.addWidget(self.btn_reject_main, 2)
         bottom_btn_layout.addWidget(self.btn_approve, 2)
         
@@ -241,8 +252,20 @@ class MainWindow(QMainWindow):
         self.shortcut_save = QShortcut(QKeySequence("Ctrl+S"), self)
         self.shortcut_save.activated.connect(self.manual_save)
         
-        # Обновляем статус Git при старте
         self.update_git_status()
+
+    # --- НОВЫЙ ЖЕСТКИЙ ЯКОРЬ ДЛЯ ВКЛАДОК ---
+    def get_current_target_id(self):
+        """Возвращает ID текущей выбранной вкладки для жесткой маршрутизации."""
+        selected_tab = self.combo_tabs.currentText()
+        if "[" in selected_tab and "]" in selected_tab:
+            return selected_tab.split("[")[-1].split("]")[0]
+        return None
+    # ----------------------------------------
+
+    def open_api_settings(self):
+        dialog = APISettingsDialog(self)
+        dialog.exec()
 
     def eventFilter(self, obj, event):
         if obj == self.editor and event.type() == QEvent.Type.Wheel:
@@ -341,18 +364,12 @@ class MainWindow(QMainWindow):
         user_text = self.prompt_input.toPlainText().strip()
         if not user_text: return
         
-        # --- НОВОЕ: Определение целевой вкладки из меню ---
+        target_id = self.get_current_target_id()
         selected_tab = self.combo_tabs.currentText()
-        target_id = None
         
         if "🔴" in selected_tab:
             self.show_popup("Ошибка связи", "Нет активных вкладок браузера!\nОткройте Gemini и обновите страницу.", is_error=True)
             return
-            
-        # Извлекаем ID из формата "Мой Браузер [TAB-A1B2]"
-        if "[" in selected_tab and "]" in selected_tab:
-            target_id = selected_tab.split("[")[-1].split("]")[0]
-        # ---------------------------------------------------
 
         attached_blocks = []
         tags_in_text = re.findall(r'@\[.*?\]|@[\w\.\-\/\\]+', user_text)
@@ -367,7 +384,6 @@ class MainWindow(QMainWindow):
         
         self.chat_logger.log("USER", user_text)
         
-        # Логируем, куда именно мы отправляем
         tab_display_name = selected_tab.split(" [")[0].replace("🟢 ", "")
         self.chat_history.append(f"<br><span style='color: #569cd6;'><b>ВЫ</b> (в <i>{tab_display_name}</i>)<b>:</b> {user_text}</span>")
         self.chat_history.append(f"<a href='view_prompt:last' style='color: #65676b; font-size: 10px;'>[Показать сырой промпт]</a>")
@@ -385,13 +401,76 @@ class MainWindow(QMainWindow):
         self.update_status_bar()
         self.retry_count = 0 
         
-        # Передаем target_id в мост!
+        # Отправляем с жестким якорем вкладки
         self.bridge.add_task(self.last_full_prompt, is_relay=False, target_id=target_id)
         
         self.log_system(f"Задача отправлена в {tab_display_name}. Ожидание ответа...")
         self.prompt_input.clear()
 
     def process_ai_response(self, raw_text):
+        # --- ПЕРЕХВАТ ТРАНЗИТНОГО ПАКЕТА (ЭСТАФЕТЫ) ---
+        if getattr(self, 'is_waiting_for_relay_msg', False):
+            self.is_waiting_for_relay_msg = False
+            self.retry_count = 0
+            self.tokens_received += self.estimate_tokens(raw_text)
+            self.update_status_bar()
+            
+            result = self.orchestrator.parse_and_validate_response(raw_text)
+            if result["status"] == "error":
+                self.show_popup("Ошибка Эстафеты", "ИИ не смог собрать пакет.\nПридется переносить историю вручную.", is_error=True)
+            else:
+                ai_summary = result["data"].get("thoughts", "")
+                
+                # Формируем финальный мега-промпт
+                mega_prompt = (
+                    "Привет! Это транзитный пакет (эстафета) из предыдущего чата. Мы продолжаем работу над нашим проектом.\n\n"
+                    "=== БРИФ ОТ ПРЕДЫДУЩЕГО ИИ (СТАТУС И ПЛАН) ===\n"
+                    f"{ai_summary}\n\n"
+                    "Пожалуйста, внимательно прочитай бриф и вникай в архитектуру.\n"
+                    "Для ответа используй СТРОГИЙ ФОРМАТ JSON согласно нашим правилам Оркестратора.\n"
+                    "В поле 'thoughts' напиши 'Контекст принял, план ясен, готов к работе', а массивы 'updates' и 'create_files' оставь пустыми []."
+                )
+                
+                # Копируем в буфер обмена
+                clipboard = QApplication.clipboard()
+                clipboard.setText(mega_prompt)
+                
+                self.chat_history.append("<span style='color: #31a24c;'><b>[СИСТЕМА] Транзитный пакет успешно скопирован в буфер обмена!</b></span>")
+                self.scroll_chat()
+                
+                self.show_popup("Эстафета готова!", 
+                                "Мега-промпт (бриф + контекст) успешно скопирован в буфер обмена!\n\n"
+                                "1. Откройте новый чат Gemini (в другом браузере или аккаунте).\n"
+                                "2. Выберите эту новую вкладку в VibeCoder.\n"
+                                "3. Нажмите Ctrl+V прямо на сайте Gemini и отправьте.\n\n"
+                                "Работа будет бесшовно продолжена!")
+            return
+            
+        # --- ПЕРЕХВАТ ИИ-КОММИТА ---
+        if getattr(self, 'is_waiting_for_commit_msg', False):
+            self.is_waiting_for_commit_msg = False
+            self.retry_count = 0
+            self.tokens_received += self.estimate_tokens(raw_text)
+            self.update_status_bar()
+            
+            result = self.orchestrator.parse_and_validate_response(raw_text)
+            if result["status"] == "error":
+                self.show_popup("Ошибка", "ИИ не смог сгенерировать коммит.", is_error=True)
+                if hasattr(self, 'current_git_dialog') and self.current_git_dialog:
+                    self.current_git_dialog.btn_ai.setText("✨ Сгенерировать ИИ-описание")
+                    self.current_git_dialog.btn_ai.setEnabled(True)
+            else:
+                commit_msg = result["data"].get("thoughts", "Автоматический коммит")
+                
+                if hasattr(self, 'current_git_dialog') and self.current_git_dialog and self.current_git_dialog.isVisible():
+                    self.current_git_dialog.text_input.setPlainText(commit_msg)
+                    self.current_git_dialog.btn_ai.setText("✨ Сгенерировать ИИ-описание")
+                    self.current_git_dialog.btn_ai.setEnabled(True)
+                else:
+                    self.open_git_dialog(prefill_msg=commit_msg)
+            return
+        
+        # --- СТАНДАРТНАЯ ОБРАБОТКА КОДА ---
         self.tokens_received += self.estimate_tokens(raw_text)
         self.update_status_bar()
         self.chat_history.append("<span style='color: #bb86fc;'><b>[GEMINI] Ответ получен. Проверка и патчинг...</b></span>")
@@ -409,7 +488,8 @@ class MainWindow(QMainWindow):
             self.log_system(f"ОШИБКА ИИ: {result['error_message']}", color="#ff4444")
             self.log_system(f"Авто-исправление (Попытка {self.retry_count} из 2)...", color="#ffaa00")
             fix_prompt = (f"Твой предыдущий ответ вызвал фатальную ошибку: {result['error_message']}\nКАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать извинения вне JSON.\nВот исходная задача. Пришли чистый JSON для неё:\n{self.last_full_prompt}\n")
-            self.bridge.add_task(fix_prompt)
+            # Отправка с жестким якорем
+            self.bridge.add_task(fix_prompt, target_id=self.get_current_target_id())
         else:
             self.retry_count = 0 
             data = result["data"]
@@ -433,7 +513,7 @@ class MainWindow(QMainWindow):
                     self.send_requested_files(requested_files)
                     return
 
-            # 2. СОЗДАНИЕ ФАЙЛОВ И ПАПОК (НОВОЕ!)
+            # 2. СОЗДАНИЕ ФАЙЛОВ И ПАПОК
             create_files = data.get("create_files", [])
             if create_files:
                 from core.creation_dialog import FileCreationDialog
@@ -473,7 +553,6 @@ class MainWindow(QMainWindow):
                     abs_path = os.path.abspath(os.path.join(self.project_path, rel_path))
                     
                     if action == "modify":
-                        # Если файла нет, создаем пустой (на случай если ИИ забыл его создать)
                         if not os.path.exists(abs_path):
                             open(abs_path, 'w', encoding='utf-8').close()
                         
@@ -488,7 +567,6 @@ class MainWindow(QMainWindow):
                             search_block = change.get("search", "").replace('\r\n', '\n')
                             replace_block = change.get("replace", "").replace('\r\n', '\n')
                             
-                            # Если search пустой, значит ИИ хочет полностью переписать файл
                             if search_block == "":
                                 patched_code = replace_block
                             elif search_block in patched_code:
@@ -502,7 +580,7 @@ class MainWindow(QMainWindow):
                             self.log_system(f"ИИ ОШИБСЯ С КОНТЕКСТОМ! Блок не найден в {rel_path}. Запрос переделки...", color="#ffaa00")
                             self.retry_count += 1
                             error_prompt = f"Твой ответ отклонен системой (Smart Diff Error).\nЯ не нашел следующий блок 'search' в файле {rel_path}:\n```python\n{failed_search_block}\n```\nПожалуйста, скопируй ТОЧНЫЕ строки из моего исходного файла в поле 'search'. Или оставь 'search' пустым, если пишешь файл с нуля. Повтори JSON."
-                            self.bridge.add_task(error_prompt)
+                            self.bridge.add_task(error_prompt, target_id=self.get_current_target_id())
                             return
                         
                         update["code"] = patched_code
@@ -519,7 +597,6 @@ class MainWindow(QMainWindow):
         self.scroll_chat()
 
     def send_requested_files(self, file_paths):
-        """Автоматически собирает код запрошенных файлов и отправляет ИИ"""
         attached_blocks = []
         for path in file_paths:
             fname = os.path.basename(path)
@@ -532,7 +609,7 @@ class MainWindow(QMainWindow):
         system_text = "[СИСТЕМНОЕ СООБЩЕНИЕ: ПОЛЬЗОВАТЕЛЬ ПРЕДОСТАВИЛ ЗАПРОШЕННЫЕ ФАЙЛЫ]\n\n" + "\n\n".join(attached_blocks) + "\n\nПроанализируй их и выполни предыдущую задачу."
         
         self.chat_logger.log("SYSTEM", f"Авто-отправка файлов: {', '.join(file_paths)}")
-        self.chat_history.append(f"<br><span style='color: #0e639c;'><b>[СИСТЕМА] Автоматически отправлены файлы:</b> {', '.join(file_paths)}</span>")
+        self.chat_history.append(f"<br><span style='color: #0e639c;'><b>[СИСТЕМА] Автоматически отправлены:</b> {', '.join(file_paths)}</span>")
         self.scroll_chat()
         
         self.last_full_prompt = self.orchestrator.format_request(
@@ -546,11 +623,11 @@ class MainWindow(QMainWindow):
         self.update_status_bar()
         self.retry_count = 0 
         
-        self.bridge.add_task(self.last_full_prompt)
+        # Жесткий якорь
+        self.bridge.add_task(self.last_full_prompt, target_id=self.get_current_target_id())
         self.log_system("Файлы отправлены. Ожидание ответа...")
 
     def manual_save(self):
-        """Быстрое сохранение руками (Ctrl+S) с созданием бэкапа"""
         if not self.current_file_path: return
         current_text = self.editor.text()
         
@@ -564,7 +641,6 @@ class MainWindow(QMainWindow):
             self.update_git_status()
 
     def review_and_approve(self):
-        """Логика кнопки Утвердить код (Конвейер изменений)"""
         if self.proposed_updates:
             update = self.proposed_updates[0] 
             rel_path = update.get("file_path", "")
@@ -643,7 +719,7 @@ class MainWindow(QMainWindow):
             self.btn_git.setText(f"📦 Git (Изменено: {status_count})")
             self.btn_git.setStyleSheet("background-color: #e65100; color: white; font-weight: bold; border-radius: 4px;")
 
-    def open_git_dialog(self):
+    def open_git_dialog(self, prefill_msg=""):
         if not self.git_manager.is_repo():
             reply = QMessageBox.question(self, "Git", "В этой папке нет Git-репозитория. Инициализировать сейчас?",
                                          QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
@@ -656,19 +732,24 @@ class MainWindow(QMainWindow):
                     self.show_popup("Ошибка", f"Не удалось инициализировать Git:\n{msg}", is_error=True)
             return
 
-        dlg = GitDialog(self, self.git_manager)
-        dlg.exec()
+        self.current_git_dialog = GitDialog(self, self.git_manager)
+        if prefill_msg:
+            self.current_git_dialog.text_input.setPlainText(prefill_msg)
+        self.current_git_dialog.exec()
+        self.current_git_dialog = None
 
     def request_ai_commit_message(self, diff_text):
-        # Защита от гигантских коммитов, чтобы не забить контекст ИИ
+        self.is_waiting_for_commit_msg = True 
+        
         if len(diff_text) > 10000:
             diff_text = diff_text[:10000] + "\n...[DIFF СЛИШКОМ БОЛЬШОЙ, ОБРЕЗАН]..."
 
-        # Фоновый промпт, заставляющий ИИ ответить по стандартам Оркестратора
         prompt = (f"Сгенерируй короткое, профессиональное сообщение для Git коммита на основе этого Diff кода:\n\n"
                   f"```diff\n{diff_text}\n```\n\n"
                   f"Напиши текст коммита в поле 'thoughts', а массив 'updates' оставь пустым []. "
-                  f"Пиши на русском языке, используй общепринятые префиксы (feat:, fix:, refactor:).")
+                  f"Пиши на русском языке, используй общепринятые префиксы (feat:, fix:, refactor:). "
+                  f"ВАЖНО: КАТЕГОРИЧЕСКИ ЗАПРЕЩАЕТСЯ использовать двойные кавычки (\") внутри текста коммита. "
+                  f"Используй только одинарные (') или елочки («»), чтобы не сломать формат JSON!")
 
         self.chat_logger.log("SYSTEM", "Запрос ИИ-коммита...")
         self.chat_history.append(f"<br><span style='color: #673ab7;'><b>[СИСТЕМА] Отправка diff для генерации ИИ-коммита...</b></span>")
@@ -685,7 +766,8 @@ class MainWindow(QMainWindow):
         self.update_status_bar()
         self.retry_count = 0
 
-        self.bridge.add_task(self.last_full_prompt)
+        # Жесткий якорь
+        self.bridge.add_task(self.last_full_prompt, target_id=self.get_current_target_id())
 
     # =======================================================
     # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ И ОБРАБОТЧИКИ
@@ -723,8 +805,8 @@ class MainWindow(QMainWindow):
         if not self.btn_pause.isChecked():
             self.btn_pause.setChecked(True)
             self.toggle_pause()
-        self.log_system("🚨 ЛИМИТЫ GEMINI ИСЧЕРПАНЫ!", color="#ff4444")
-        self.show_popup("Лимиты исчерпаны", "Gemini сообщает об исчерпании лимитов.\n\nОткройте другой аккаунт Google или браузер, затем нажмите '▶ Продолжить'.", is_error=True)
+        self.log_system("🚨 ЛИМИТЫ GEMINI ИСЧЕРПАНЫ! Запускаю авто-сборку Транзитного Пакета...", color="#ff4444")
+        self.force_relay()
 
     def estimate_tokens(self, text):
         return int(len(text) / 2.5)
@@ -749,24 +831,41 @@ class MainWindow(QMainWindow):
         dlg = HistoryDialog(self, self.chat_logger)
         dlg.exec()
 
+    # --- НОВАЯ СМАРТ-ЭСТАФЕТА (ТРАНЗИТНЫЙ ПАКЕТ) ---
     def force_relay(self):
-        file_content = self.editor.text() if self.current_file_path else ""
-        relay_prompt = self.orchestrator.format_request(
-            user_prompt="Продолжаем работу. Ожидай следующих указаний.",
+        self.is_waiting_for_relay_msg = True
+        
+        prompt = (
+            "[СИСТЕМНАЯ КОМАНДА: ФОРМИРОВАНИЕ ТРАНЗИТНОГО ПАКЕТА]\n"
+            "Наша сессия подходит к концу из-за исчерпания контекста/лимитов. Твоя задача — передать дела своему 'сменщику' (следующей модели, которая откроет новый чат).\n"
+            "Проанализируй всю нашу текущую переписку и составь максимально подробный бриф для продолжения работы.\n\n"
+            "Напиши текст в поле 'thoughts' (массив 'updates' оставь пустым), строго следуя этой структуре:\n"
+            "1. Глобальная цель: Кратко, что за проект мы пишем.\n"
+            "2. Архитектурные правила: Какие технологии используем.\n"
+            "3. Текущий прогресс: Что уже успешно реализовано и работает.\n"
+            "4. Точка прерывания: На чем конкретно мы остановились прямо сейчас?\n"
+            "5. План действий (Next Steps): Четкие инструкции для следующего ИИ.\n\n"
+            "ВАЖНО: КАТЕГОРИЧЕСКИ ЗАПРЕЩАЕТСЯ использовать двойные кавычки (\") внутри текста! Используй только одинарные (') или елочки («»)."
+        )
+        
+        self.chat_logger.log("SYSTEM", "Запрос транзитного пакета у ИИ...")
+        self.chat_history.append("<br><span style='color: #005f73;'><b>[СИСТЕМА] Сбор Транзитного Пакета (эстафеты)...</b></span>")
+        self.scroll_chat()
+
+        self.last_full_prompt = self.orchestrator.format_request(
+            user_prompt=prompt,
             project_path=self.project_path,
             current_file_path=self.current_file_path,
-            file_content=file_content
+            file_content=""
         )
-        tokens = self.estimate_tokens(relay_prompt)
-        self.tokens_sent += tokens
+        
+        self.tokens_sent += self.estimate_tokens(self.last_full_prompt)
         self.update_status_bar()
-        log_id = self.chat_logger.log("RELAY", "Контекст сформирован для нового чата.", hidden_data=relay_prompt)
-        self.chat_history.append(f"<br><div style='background-color: #1a3320; padding: 5px;'><b>[СМЕНА СЕССИИ]</b> Сформирован пакет эстафеты (~{tokens:,} токенов). <a href='relay:{log_id}' style='color: #569cd6;'><b>[Показать текст]</b></a></div>")
-        self.scroll_chat()
-        self.bridge.add_task(relay_prompt, is_relay=True)
-        self.tokens_sent = 0
-        self.tokens_received = 0
-        self.update_status_bar()
+        self.retry_count = 0
+        
+        # Запрашиваем в текущем чате (жесткий якорь)
+        self.bridge.add_task(self.last_full_prompt, target_id=self.get_current_target_id())
+    # -----------------------------------------------
 
     def log_system(self, text, color="#0e639c"):
         self.chat_logger.log("SYSTEM", text)
@@ -777,11 +876,7 @@ class MainWindow(QMainWindow):
         scrollbar = self.chat_history.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
-    # =======================================================
-    # НОВАЯ ФУНКЦИЯ ДЛЯ ИНДИКАТОРА ВКЛАДОК
-    # =======================================================
     def update_tabs_ui(self):
-        """Обновляет выпадающий список живых вкладок каждые 2 секунды"""
         if not hasattr(self, 'bridge') or not hasattr(self.bridge, 'get_active_tabs'):
             return
             
