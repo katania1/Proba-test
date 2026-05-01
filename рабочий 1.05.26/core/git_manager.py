@@ -142,11 +142,3 @@ class GitManager:
         if not success:
             return False, output
         return True, "Код успешно отправлен в облако!"
-
-    def pull_from_cloud(self):
-        """Скачивает изменения с GitHub (Синхронизация)"""
-        branch = self.get_current_branch()
-        success, output = self.run_git('pull', 'origin', branch)
-        if not success:
-            return False, output
-        return True, "Код успешно скачан из облака!"

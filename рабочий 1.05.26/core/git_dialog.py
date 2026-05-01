@@ -51,7 +51,7 @@ class GitDialog(QDialog):
         layout.addWidget(line)
 
         # --- БЛОК 2: ОБЛАКО (GitHub) ---
-        lbl_cloud = QLabel("2. Синхронизация с GitHub (Push / Pull)")
+        lbl_cloud = QLabel("2. Синхронизация с GitHub (Push)")
         lbl_cloud.setStyleSheet("font-size: 14px; font-weight: bold; color: #e6a822;")
         layout.addWidget(lbl_cloud)
 
@@ -68,20 +68,10 @@ class GitDialog(QDialog):
         url_layout.addWidget(self.btn_link)
         layout.addLayout(url_layout)
 
-        # Кнопки облака (в один ряд)
-        cloud_buttons_layout = QHBoxLayout()
-
-        self.btn_pull = QPushButton("⬇️ Скачать (Pull)")
-        self.btn_pull.setStyleSheet("background-color: #1976d2; color: white; font-weight: bold; padding: 10px 15px; border-radius: 4px; font-size: 14px;")
-        self.btn_pull.clicked.connect(self.pull_code)
-
-        self.btn_push = QPushButton("☁️ Отправить (Push)")
+        self.btn_push = QPushButton("☁️ Отправить код в облако (Push)")
         self.btn_push.setStyleSheet("background-color: #005f73; color: white; font-weight: bold; padding: 10px 15px; border-radius: 4px; font-size: 14px;")
         self.btn_push.clicked.connect(self.push_code)
-        
-        cloud_buttons_layout.addWidget(self.btn_pull)
-        cloud_buttons_layout.addWidget(self.btn_push)
-        layout.addLayout(cloud_buttons_layout)
+        layout.addWidget(self.btn_push)
 
     def load_remote_url(self):
         """Загружает привязанную ссылку при открытии окна"""
@@ -138,31 +128,10 @@ class GitDialog(QDialog):
 
         success, msg = self.git_manager.push_to_cloud()
         
-        self.btn_push.setText("☁️ Отправить (Push)")
+        self.btn_push.setText("☁️ Отправить код в облако (Push)")
         self.btn_push.setEnabled(True)
 
         if success:
             QMessageBox.information(self, "Успех", "✅ Код успешно отправлен в GitHub!")
         else:
             QMessageBox.critical(self, "Ошибка Push", f"Не удалось отправить код:\n{msg}\n\nВозможно, нужно авторизоваться в браузере или репозиторий не пустой.")
-
-    def pull_code(self):
-        """Скачивает коммиты с GitHub"""
-        if not self.git_manager.get_remote_url():
-            QMessageBox.warning(self, "Ошибка", "Сначала привяжите ссылку на репозиторий GitHub!")
-            return
-        
-        self.btn_pull.setText("⏳ Скачивание...")
-        self.btn_pull.setEnabled(False)
-        self.repaint()
-
-        success, msg = self.git_manager.pull_from_cloud()
-        
-        self.btn_pull.setText("⬇️ Скачать (Pull)")
-        self.btn_pull.setEnabled(True)
-
-        if success:
-            QMessageBox.information(self, "Успех", "✅ Код успешно скачан с GitHub!\n(Если у вас были открыты вкладки с файлами, вам может понадобиться переоткрыть их, чтобы увидеть изменения).")
-            self.parent_window.update_git_status()
-        else:
-            QMessageBox.critical(self, "Ошибка Pull", f"Не удалось скачать код:\n{msg}\n\nВозможно, у вас есть несохраненные локальные изменения, которые конфликтуют с облаком.")
