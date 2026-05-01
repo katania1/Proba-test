@@ -421,6 +421,7 @@ class MainWindow(QMainWindow):
             
         raw_tabs = self.ai_controller.bridge.get_active_tabs()
 
+        # Если вкладок нет вообще - показываем "Нет связи"
         if not raw_tabs:
             if self.combo_tabs.count() != 1 or self.combo_tabs.itemText(0) != "🔴 Нет связи":
                 self.combo_tabs.blockSignals(True)
@@ -429,46 +430,46 @@ class MainWindow(QMainWindow):
                 self.combo_tabs.blockSignals(False)
             return
 
-        # Собираем актуальные вкладки в словарь {ID: Полный_текст}
-        new_tabs_dict = {}
+        # 1. Собираем пришедшие вкладки в словарь {ID: "Полный текст"}
+        incoming_tabs = {}
         for t in raw_tabs:
             if "[" in t and "]" in t:
                 t_id = t.split("[")[-1].split("]")[0]
-                new_tabs_dict[t_id] = f"🟢 {t}"
+                incoming_tabs[t_id] = f"🟢 {t}"
 
+        # 2. Собираем ТЕКУЩИЕ вкладки в комбобоксе {ID: (Индекс, "Текущий текст")}
+        current_tabs = {}
+        for i in range(self.combo_tabs.count()):
+            text = self.combo_tabs.itemText(i)
+            if "[" in text and "]" in text:
+                t_id = text.split("[")[-1].split("]")[0]
+                current_tabs[t_id] = (i, text)
+
+        # 3. СРАВНИВАЕМ НАБОРЫ ID
+        if set(incoming_tabs.keys()) == set(current_tabs.keys()):
+            # Вкладки физически те же самые! Никто ничего не закрыл и не открыл.
+            # Значит, мы НИЧЕГО не удаляем и не меняем индексы. Просто тихо обновляем текст.
+            self.combo_tabs.blockSignals(True)
+            for t_id, (index, old_text) in current_tabs.items():
+                new_text = incoming_tabs[t_id]
+                if old_text != new_text:
+                    self.combo_tabs.setItemText(index, new_text) # Тихо меняем текст (например, на "Gemini печатает")
+            self.combo_tabs.blockSignals(False)
+            return
+
+        # 4. Если мы дошли сюда, значит вкладку реально закрыли или открыли новую.
+        # Делаем полную перерисовку, сортируя СТРОГО по ID (чтобы они никогда не прыгали)
         self.combo_tabs.blockSignals(True)
+        self.combo_tabs.clear()
 
-        # 1. Удаляем то, чего больше нет (закрытые вкладки)
-        i = 0
-        while i < self.combo_tabs.count():
-            item_text = self.combo_tabs.itemText(i)
-            if item_text == "🔴 Нет связи":
-                self.combo_tabs.removeItem(i)
-                continue
+        for t_id in sorted(incoming_tabs.keys()):
+            self.combo_tabs.addItem(incoming_tabs[t_id])
 
-            if "[" in item_text and "]" in item_text:
-                item_id = item_text.split("[")[-1].split("]")[0]
-                if item_id not in new_tabs_dict:
-                    self.combo_tabs.removeItem(i)
-                    continue
-                else:
-                    # Вкладка на месте! Просто тихо обновляем текст (если Gemini печатает)
-                    if item_text != new_tabs_dict[item_id]:
-                        self.combo_tabs.setItemText(i, new_tabs_dict[item_id])
-                    # Удаляем из словаря, чтобы не добавить как новую
-                    del new_tabs_dict[item_id]
-            i += 1
-
-        # 2. Добавляем абсолютно новые вкладки (если вы открыли новую в браузере)
-        for t_id, t_text in new_tabs_dict.items():
-            self.combo_tabs.addItem(t_text)
-
-        # 3. Жестко держим фокус
+        # Восстанавливаем фокус
         if self.locked_tab_id:
             for i in range(self.combo_tabs.count()):
                 if f"[{self.locked_tab_id}]" in self.combo_tabs.itemText(i):
-                    if self.combo_tabs.currentIndex() != i:
-                        self.combo_tabs.setCurrentIndex(i)
+                    self.combo_tabs.setCurrentIndex(i)
                     break
         else:
             if self.combo_tabs.count() > 0:
