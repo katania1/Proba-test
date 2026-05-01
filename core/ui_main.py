@@ -419,8 +419,9 @@ class MainWindow(QMainWindow):
         if not hasattr(self, 'ai_controller') or not hasattr(self.ai_controller.bridge, 'get_active_tabs'):
             return
             
-        tabs = self.ai_controller.bridge.get_active_tabs()
-        
+        raw_tabs = self.ai_controller.bridge.get_active_tabs()
+        tabs = sorted(raw_tabs) if raw_tabs else []
+
         new_items = ["🔴 Нет связи"] if not tabs else [f"🟢 {t}" for t in tabs]
         current_items = [self.combo_tabs.itemText(i) for i in range(self.combo_tabs.count())]
         
@@ -429,25 +430,28 @@ class MainWindow(QMainWindow):
             
         self.combo_tabs.blockSignals(True)
         
-        # Мягкое обновление (in-place), чтобы выпадающий список не мерцал
-        if len(new_items) != self.combo_tabs.count():
-            self.combo_tabs.clear()
-            self.combo_tabs.addItems(new_items)
-        else:
-            for i, text in enumerate(new_items):
+        # --- ИДЕАЛЬНОЕ ОБНОВЛЕНИЕ БЕЗ CLEAR() ---
+        # Удаляем лишние элементы с конца, если список уменьшился
+        while self.combo_tabs.count() > len(new_items):
+            self.combo_tabs.removeItem(self.combo_tabs.count() - 1)
+            
+        # Обновляем существующие строчки или добавляем новые
+        for i, text in enumerate(new_items):
+            if i < self.combo_tabs.count():
                 if self.combo_tabs.itemText(i) != text:
                     self.combo_tabs.setItemText(i, text)
+            else:
+                self.combo_tabs.addItem(text)
+        # ----------------------------------------
             
         # Строго восстанавливаем заблокированный ID из памяти
         if self.locked_tab_id:
             for i in range(self.combo_tabs.count()):
                 if f"[{self.locked_tab_id}]" in self.combo_tabs.itemText(i):
-                    self.combo_tabs.setCurrentIndex(i)
+                    if self.combo_tabs.currentIndex() != i:
+                        self.combo_tabs.setCurrentIndex(i)
                     break
-            # Если вкладка на долю секунды пропала (Gemini сменил title),
-            # мы НЕ сбрасываем locked_tab_id, а просто ждем следующего тика!
         else:
-            # Если блокировки еще нет, берем первую вкладку как дефолт
             if self.combo_tabs.count() > 0:
                 text = self.combo_tabs.itemText(0)
                 if "[" in text and "]" in text:
