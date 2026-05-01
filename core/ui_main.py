@@ -7,8 +7,8 @@ from PyQt6.QtGui import QShortcut, QKeySequence
 
 from core.editor import DarkPythonEditor
 from core.ai_controller import AIController
-from core.code_applier import CodeApplier  # <--- Подключили Хирурга
-from core.git_workflow import GitWorkflow  # <--- Подключили Диспетчера
+from core.code_applier import CodeApplier
+from core.git_workflow import GitWorkflow
 from core.file_ops import FileManager
 from core.chat_logger import ChatLogger
 from core.history_viewer import HistoryDialog
@@ -22,7 +22,7 @@ from core.api_settings_dialog import APISettingsDialog
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("VibeCoder v1.17 — Ultimate MVC Edition")
+        self.setWindowTitle("VibeCoder v1.18 — Ultimate MVC Edition (No Jumps)")
         
         self.settings = QSettings("VibeCoder", "Preferences")
         self.attached_files = set()
@@ -73,6 +73,7 @@ class MainWindow(QMainWindow):
         lbl_browser.setStyleSheet("color: #d4d4d4; font-weight: bold;")
         
         self.combo_tabs = QComboBox()
+        # ИСПРАВЛЕНО: Стили для невидимого шрифта вкладок (QAbstractItemView)
         self.combo_tabs.setStyleSheet("""
             QComboBox { 
                 background-color: #252526; 
@@ -83,7 +84,6 @@ class MainWindow(QMainWindow):
                 font-weight: normal; 
             }
             QComboBox::drop-down { border: none; }
-            /* НОВОЕ: Стили для выпадающего меню */
             QComboBox QAbstractItemView {
                 background-color: #1e1e1e;
                 color: #d4d4d4;
@@ -97,6 +97,10 @@ class MainWindow(QMainWindow):
         status_layout.addWidget(lbl_browser)
         status_layout.addWidget(self.combo_tabs)
         self.status_bar.addPermanentWidget(status_container)
+        
+        # ИСПРАВЛЕНО: Жесткая память выбранной вкладки (Anti-Jump)
+        self.locked_tab_id = None
+        self.combo_tabs.currentIndexChanged.connect(self.on_tab_manually_changed)
         
         self.tab_timer = QTimer(self)
         self.tab_timer.timeout.connect(self.update_tabs_ui)
@@ -260,7 +264,18 @@ class MainWindow(QMainWindow):
 
         self.update_git_status()
 
-    # --- ПРОКСИ-МЕТОДЫ (Связки для AIController) ---
+    # --- СТРОГАЯ БЛОКИРОВКА ВКЛАДКИ ---
+    def on_tab_manually_changed(self, index):
+        if index >= 0:
+            text = self.combo_tabs.itemText(index)
+            if "[" in text and "]" in text:
+                self.locked_tab_id = text.split("[")[-1].split("]")[0]
+
+    def get_current_target_id(self):
+        return self.locked_tab_id
+    # ----------------------------------
+
+    # --- ПРОКСИ-МЕТОДЫ (Связки для других компонентов) ---
     def is_path_safe(self, file_path):
         return self.code_applier.is_path_safe(file_path)
 
@@ -272,17 +287,10 @@ class MainWindow(QMainWindow):
 
     def open_git_dialog(self, prefill_msg=""):
         self.git_workflow.open_git_dialog(prefill_msg)
-    
+        
     def request_ai_commit_message(self, diff_text):
         self.ai_controller.request_ai_commit_message(diff_text)
-        
-    # -----------------------------------------------
-
-    def get_current_target_id(self):
-        selected_tab = self.combo_tabs.currentText()
-        if "[" in selected_tab and "]" in selected_tab:
-            return selected_tab.split("[")[-1].split("]")[0]
-        return None
+    # -----------------------------------------------------
 
     def open_api_settings(self):
         dialog = APISettingsDialog(self)
@@ -406,12 +414,12 @@ class MainWindow(QMainWindow):
         scrollbar = self.chat_history.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
+    # --- ИСПРАВЛЕНИЕ: Жесткая привязка вкладок (Anti-Jump) ---
     def update_tabs_ui(self):
         if not hasattr(self, 'ai_controller') or not hasattr(self.ai_controller.bridge, 'get_active_tabs'):
             return
             
         tabs = self.ai_controller.bridge.get_active_tabs()
-        current_id = self.get_current_target_id()
         
         new_items = ["🔴 Нет связи"] if not tabs else [f"🟢 {t}" for t in tabs]
         current_items = [self.combo_tabs.itemText(i) for i in range(self.combo_tabs.count())]
@@ -425,10 +433,17 @@ class MainWindow(QMainWindow):
         self.combo_tabs.setEnabled(bool(tabs))
         self.combo_tabs.addItems(new_items)
             
-        if current_id:
+        # Строго восстанавливаем заблокированный ID из памяти
+        if self.locked_tab_id:
             for i in range(self.combo_tabs.count()):
-                if f"[{current_id}]" in self.combo_tabs.itemText(i):
+                if f"[{self.locked_tab_id}]" in self.combo_tabs.itemText(i):
                     self.combo_tabs.setCurrentIndex(i)
                     break
+        else:
+            # Если блокировки еще нет, берем первую вкладку как дефолт
+            if self.combo_tabs.count() > 0:
+                text = self.combo_tabs.itemText(0)
+                if "[" in text and "]" in text:
+                    self.locked_tab_id = text.split("[")[-1].split("]")[0]
                     
         self.combo_tabs.blockSignals(False)

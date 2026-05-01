@@ -1,5 +1,6 @@
 import os
 import re
+import json
 from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtWidgets import QMessageBox, QApplication, QDialog
 
@@ -7,18 +8,16 @@ from core.ai_orchestrator import AIOrchestrator
 from core.bridge import VibeBridge
 
 class AIController(QObject):
-    # Сигналы для безопасного общения с GUI
     ai_response_signal = pyqtSignal(str)
     limit_reached_signal = pyqtSignal()
 
     def __init__(self, main_window):
         super().__init__()
-        self.mw = main_window # Ссылка на главное окно (View)
+        self.mw = main_window 
         
         self.orchestrator = AIOrchestrator()
         self.bridge = VibeBridge()
         
-        # Подключаем сигналы моста
         self.bridge.on_result_received = lambda text: self.ai_response_signal.emit(text)
         self.bridge.on_limit_reached = lambda: self.limit_reached_signal.emit()
         
@@ -92,7 +91,7 @@ class AIController(QObject):
                   f"Напиши текст коммита в поле 'thoughts', а массив 'updates' оставь пустым []. "
                   f"Пиши на русском языке, используй общепринятые префиксы (feat:, fix:, refactor:). "
                   f"ВАЖНО: КАТЕГОРИЧЕСКИ ЗАПРЕЩАЕТСЯ использовать двойные кавычки (\") внутри текста коммита. "
-                  f"Используй только одинарные (') или елочки («»), чтобы не сломать формат JSON!")
+                  f"Используй только одинарные (') или елочки («»).")
 
         self.mw.chat_logger.log("SYSTEM", "Запрос ИИ-коммита...")
         self.mw.chat_history.append(f"<br><span style='color: #673ab7;'><b>[СИСТЕМА] Отправка diff для генерации ИИ-коммита...</b></span>")
@@ -116,7 +115,7 @@ class AIController(QObject):
         
         prompt = (
             "[СИСТЕМНАЯ КОМАНДА: ФОРМИРОВАНИЕ ТРАНЗИТНОГО ПАКЕТА]\n"
-            "Наша сессия подходит к концу из-за исчерпания контекста/лимитов. Твоя задача — передать дела своему 'сменщику' (следующей модели, которая откроет новый чат).\n"
+            "Наша сессия подходит к концу из-за исчерпания контекста/лимитов. Твоя задача — передать дела своему 'сменщику'.\n"
             "Проанализируй всю нашу текущую переписку и составь максимально подробный бриф для продолжения работы.\n\n"
             "Напиши текст в поле 'thoughts' (массив 'updates' оставь пустым), строго следуя этой структуре:\n"
             "1. Глобальная цель: Кратко, что за проект мы пишем.\n"
@@ -181,6 +180,29 @@ class AIController(QObject):
         self.mw.log_system("🚨 ЛИМИТЫ GEMINI ИСЧЕРПАНЫ! Запускаю авто-сборку Транзитного Пакета...", color="#ff4444")
         self.force_relay()
 
+    # --- БРОНЕБОЙНЫЙ ЭКСТРАКТОР ТЕКСТА ---
+    def _extract_thoughts_robustly(self, raw_text):
+        """Извлекает текст thoughts, обходя строгие правила валидатора кода"""
+        result = self.orchestrator.parse_and_validate_response(raw_text)
+        if result["status"] == "success":
+            return result["data"].get("thoughts", "")
+
+        # Если валидатор забраковал (пустые updates или кривые переносы), парсим жестко
+        start_idx = raw_text.find('{')
+        end_idx = raw_text.rfind('}') + 1
+        if start_idx != -1 and end_idx != -1:
+            json_str = raw_text[start_idx:end_idx]
+            try:
+                data = json.loads(json_str)
+                return data.get("thoughts", "")
+            except Exception:
+                # Если JSON сломан неэкранированными \n, выдираем регуляркой
+                match = re.search(r'"thoughts"\s*:\s*"(.*?)"\s*,\s*"(?:request_files|create_files|updates)"', json_str, re.DOTALL)
+                if match:
+                    return match.group(1).replace('\\n', '\n').replace('\\"', '"')
+                    
+        return raw_text.replace('```json', '').replace('```', '').strip()
+
     def process_ai_response(self, raw_text):
         # --- ПЕРЕХВАТ ТРАНЗИТНОГО ПАКЕТА (ЭСТАФЕТЫ) ---
         if self.is_waiting_for_relay_msg:
@@ -189,24 +211,33 @@ class AIController(QObject):
             self.mw.tokens_received += self.estimate_tokens(raw_text)
             self.mw.update_status_bar()
             
-            result = self.orchestrator.parse_and_validate_response(raw_text)
-            if result["status"] == "error":
+            ai_summary = self._extract_thoughts_robustly(raw_text)
+            
+            if not ai_summary:
                 self.mw.show_popup("Ошибка Эстафеты", "ИИ не смог собрать пакет.\nПридется переносить историю вручную.", is_error=True)
-            else:
-                commit_msg = result["data"].get("thoughts", "Автоматический коммит")
+                return
                 
-                # --- НОВОЕ: Дублируем коммит в окно чата и сохраняем в лог ---
-                self.mw.chat_history.append(f"<br><span style='color: #4CAF50;'><b>[ИИ-Коммит]:</b> {commit_msg}</span>")
-                self.mw.chat_logger.log("AI", f"Сгенерирован коммит: {commit_msg}")
-                self.mw.scroll_chat()
-                # -------------------------------------------------------------
-                
-                if hasattr(self.mw, 'current_git_dialog') and self.mw.current_git_dialog and self.mw.current_git_dialog.isVisible():
-                    self.mw.current_git_dialog.text_input.setPlainText(commit_msg)
-                    self.mw.current_git_dialog.btn_ai.setText("✨ Сгенерировать ИИ-описание")
-                    self.mw.current_git_dialog.btn_ai.setEnabled(True)
-                else:
-                    self.mw.open_git_dialog(prefill_msg=commit_msg)
+            mega_prompt = (
+                "Привет! Это транзитный пакет (эстафета) из предыдущего чата. Мы продолжаем работу над нашим проектом.\n\n"
+                "=== БРИФ ОТ ПРЕДЫДУЩЕГО ИИ (СТАТУС И ПЛАН) ===\n"
+                f"{ai_summary}\n\n"
+                "Пожалуйста, внимательно прочитай бриф и вникай в архитектуру.\n"
+                "Для ответа используй СТРОГИЙ ФОРМАТ JSON согласно нашим правилам Оркестратора.\n"
+                "В поле 'thoughts' напиши 'Контекст принял, план ясен, готов к работе', а массивы 'updates' и 'create_files' оставь пустыми []."
+            )
+            
+            clipboard = QApplication.clipboard()
+            clipboard.setText(mega_prompt)
+            
+            self.mw.chat_history.append("<span style='color: #31a24c;'><b>[СИСТЕМА] Транзитный пакет успешно скопирован в буфер обмена!</b></span>")
+            self.mw.scroll_chat()
+            
+            self.mw.show_popup("Эстафета готова!", 
+                            "Мега-промпт (бриф + контекст) успешно скопирован в буфер обмена!\n\n"
+                            "1. Откройте новый чат Gemini (в другом браузере или аккаунте).\n"
+                            "2. Выберите эту новую вкладку в VibeCoder.\n"
+                            "3. Нажмите Ctrl+V прямо на сайте Gemini и отправьте.\n\n"
+                            "Работа будет бесшовно продолжена!")
             return
             
         # --- ПЕРЕХВАТ ИИ-КОММИТА ---
@@ -216,21 +247,22 @@ class AIController(QObject):
             self.mw.tokens_received += self.estimate_tokens(raw_text)
             self.mw.update_status_bar()
             
-            result = self.orchestrator.parse_and_validate_response(raw_text)
-            if result["status"] == "error":
-                self.mw.show_popup("Ошибка", "ИИ не смог сгенерировать коммит.", is_error=True)
-                if hasattr(self.mw, 'current_git_dialog') and self.mw.current_git_dialog:
-                    self.mw.current_git_dialog.btn_ai.setText("✨ Сгенерировать ИИ-описание")
-                    self.mw.current_git_dialog.btn_ai.setEnabled(True)
+            commit_msg = self._extract_thoughts_robustly(raw_text)
+            if not commit_msg:
+                 commit_msg = "Автоматический коммит (не удалось распарсить ответ ИИ)"
+                 
+            # Экранируем HTML, чтобы текст 100% отобразился в чате
+            safe_msg = commit_msg.replace('<', '&lt;').replace('>', '&gt;').replace('\n', '<br>')
+            self.mw.chat_history.append(f"<br><span style='color: #4CAF50;'><b>[ИИ-Коммит]:</b><br>{safe_msg}</span>")
+            self.mw.chat_logger.log("AI", f"Сгенерирован коммит:\n{commit_msg}")
+            self.mw.scroll_chat()
+            
+            if hasattr(self.mw, 'current_git_dialog') and self.mw.current_git_dialog and self.mw.current_git_dialog.isVisible():
+                self.mw.current_git_dialog.text_input.setPlainText(commit_msg)
+                self.mw.current_git_dialog.btn_ai.setText("✨ Сгенерировать ИИ-описание")
+                self.mw.current_git_dialog.btn_ai.setEnabled(True)
             else:
-                commit_msg = result["data"].get("thoughts", "Автоматический коммит")
-                
-                if hasattr(self.mw, 'current_git_dialog') and self.mw.current_git_dialog and self.mw.current_git_dialog.isVisible():
-                    self.mw.current_git_dialog.text_input.setPlainText(commit_msg)
-                    self.mw.current_git_dialog.btn_ai.setText("✨ Сгенерировать ИИ-описание")
-                    self.mw.current_git_dialog.btn_ai.setEnabled(True)
-                else:
-                    self.mw.open_git_dialog(prefill_msg=commit_msg)
+                self.mw.open_git_dialog(prefill_msg=commit_msg)
             return
         
         # --- СТАНДАРТНАЯ ОБРАБОТКА КОДА ---
