@@ -54,10 +54,36 @@ class GitManager:
         success, output = self.run_git('status', '--porcelain')
         return len(output.split('\n')) if success and output else (0 if success else -1)
 
+    # --- ИСПРАВЛЕННЫЙ МЕТОД ---
     def get_changed_files(self):
         if not self.is_repo(): return []
         success, output = self.run_git('status', '--porcelain')
-        return [line[3:].strip('"') for line in output.split('\n') if len(line) > 3] if success and output else []
+        if not success or not output: return []
+        
+        files = []
+        for line in output.splitlines():
+            line = line.strip() # Очищаем каждую строку от лишних пробелов по краям
+            if not line: continue
+            
+            # Умное разбиение: строго на 2 части (Статус и Путь), игнорируя лишние пробелы
+            parts = line.split(maxsplit=1)
+            if len(parts) < 2: continue
+            
+            file_path = parts[1].strip()
+            
+            # Снимаем кавычки, если Git экранировал русские буквы
+            if file_path.startswith('"') and file_path.endswith('"'):
+                file_path = file_path[1:-1]
+                
+            # Если файл был переименован (R old -> new)
+            if ' -> ' in file_path:
+                file_path = file_path.split(' -> ')[-1].strip()
+                if file_path.startswith('"') and file_path.endswith('"'):
+                    file_path = file_path[1:-1]
+                    
+            if file_path:
+                files.append(file_path)
+        return files
 
     def get_all_tracked_files(self):
         if not self.is_repo(): return []

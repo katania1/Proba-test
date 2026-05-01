@@ -311,7 +311,8 @@ class GitDialog(QDialog):
             self.file_tree.blockSignals(False)
             return
             
-        cleaned_files = sorted([f.replace('\\', '/').strip(' /"') for f in files if f.strip(' /"')])
+        # Убрали опасный strip, который съедал первую букву папки core!
+        cleaned_files = sorted([f.replace('\\', '/') for f in files if f])
         folder_nodes = {}
 
         for file_path in cleaned_files:
