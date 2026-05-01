@@ -19,13 +19,13 @@ class VibeBridge:
         self.on_result_received = None 
         self.on_limit_reached = None   
         
-        # --- НОВОЕ: Учет живых вкладок ---
+        # --- Учет живых вкладок ---
         self.active_tabs = {}
         
         self._setup_routes()
 
     def _setup_routes(self):
-        # --- НОВОЕ: Обработчик пульса от вкладок ---
+        # --- Обработчик пульса от вкладок ---
         @self.app.route('/ping', methods=['POST', 'OPTIONS'])
         def ping():
             if request.method == 'OPTIONS':
@@ -47,7 +47,7 @@ class VibeBridge:
             if not self.current_task:
                 return jsonify({"state": "STOPPED"})
                 
-            # --- НОВОЕ: Проверка адресата ---
+            # --- Проверка адресата ---
             req_target = request.args.get('target_id')
             task_target = self.current_task.get('target_id')
             
@@ -88,11 +88,14 @@ class VibeBridge:
                 self.on_limit_reached()
             return jsonify({"success": True})
 
-    # --- НОВОЕ: Функция для интерфейса UI ---
+    # --- Функция для интерфейса UI ---
     def get_active_tabs(self):
         current_time = time.time()
-        # Удаляем вкладки, которые молчат дольше 5 секунд
-        stale = [t for t, info in self.active_tabs.items() if current_time - info['time'] > 5]
+        
+        # 🟢 ИСПРАВЛЕНИЕ ПРЫЖКА ЗДЕСЬ: Увеличиваем таймаут с 5 до 12 секунд!
+        # Теперь, даже если вкладка намертво "задумается" генерируя ответ,
+        # программа подождет 12 секунд, прежде чем сбросить её.
+        stale = [t for t, info in self.active_tabs.items() if current_time - info['time'] > 12.0]
         for t in stale:
             del self.active_tabs[t]
             
@@ -117,5 +120,5 @@ class VibeBridge:
             'prompt': prompt,
             'status': 'pending',
             'is_relay': is_relay,
-            'target_id': target_id  # <-- НОВОЕ: Адресат задачи
+            'target_id': target_id  # Адресат задачи
         }
