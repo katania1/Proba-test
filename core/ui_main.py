@@ -425,12 +425,22 @@ class MainWindow(QMainWindow):
         new_items = ["🔴 Нет связи"] if not tabs else [f"🟢 {t}" for t in tabs]
         current_items = [self.combo_tabs.itemText(i) for i in range(self.combo_tabs.count())]
         
-        if new_items == current_items:
-            return 
+        # --- ГЕНИАЛЬНЫЙ ФИКС: Сравниваем только ID, полностью игнорируя названия! ---
+        def get_ids(items_list):
+            ids = []
+            for item in items_list:
+                if "[" in item and "]" in item:
+                    ids.append(item.split("[")[-1].split("]")[0])
+                else:
+                    ids.append(item) # Для "Нет связи"
+            return ids
+
+        if get_ids(new_items) == get_ids(current_items):
+            return # Вкладки те же самые. Игнорируем смену заголовков браузера!
+        # ----------------------------------------------------------------------------
             
         self.combo_tabs.blockSignals(True)
         
-        # --- ИДЕАЛЬНОЕ ОБНОВЛЕНИЕ БЕЗ CLEAR() ---
         # Удаляем лишние элементы с конца, если список уменьшился
         while self.combo_tabs.count() > len(new_items):
             self.combo_tabs.removeItem(self.combo_tabs.count() - 1)
@@ -438,11 +448,9 @@ class MainWindow(QMainWindow):
         # Обновляем существующие строчки или добавляем новые
         for i, text in enumerate(new_items):
             if i < self.combo_tabs.count():
-                if self.combo_tabs.itemText(i) != text:
-                    self.combo_tabs.setItemText(i, text)
+                self.combo_tabs.setItemText(i, text)
             else:
                 self.combo_tabs.addItem(text)
-        # ----------------------------------------
             
         # Строго восстанавливаем заблокированный ID из памяти
         if self.locked_tab_id:
