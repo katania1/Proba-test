@@ -428,10 +428,15 @@ class MainWindow(QMainWindow):
             return 
             
         self.combo_tabs.blockSignals(True)
-        self.combo_tabs.clear()
         
-        self.combo_tabs.setEnabled(bool(tabs))
-        self.combo_tabs.addItems(new_items)
+        # Мягкое обновление (in-place), чтобы выпадающий список не мерцал
+        if len(new_items) != self.combo_tabs.count():
+            self.combo_tabs.clear()
+            self.combo_tabs.addItems(new_items)
+        else:
+            for i, text in enumerate(new_items):
+                if self.combo_tabs.itemText(i) != text:
+                    self.combo_tabs.setItemText(i, text)
             
         # Строго восстанавливаем заблокированный ID из памяти
         if self.locked_tab_id:
@@ -439,6 +444,8 @@ class MainWindow(QMainWindow):
                 if f"[{self.locked_tab_id}]" in self.combo_tabs.itemText(i):
                     self.combo_tabs.setCurrentIndex(i)
                     break
+            # Если вкладка на долю секунды пропала (Gemini сменил title),
+            # мы НЕ сбрасываем locked_tab_id, а просто ждем следующего тика!
         else:
             # Если блокировки еще нет, берем первую вкладку как дефолт
             if self.combo_tabs.count() > 0:

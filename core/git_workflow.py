@@ -39,3 +39,4 @@ class GitWorkflow:
             self.mw.current_git_dialog.text_input.setPlainText(prefill_msg)
         self.mw.current_git_dialog.exec()
         self.mw.current_git_dialog = None
+        self.update_git_status()
