@@ -193,29 +193,20 @@ class AIController(QObject):
             if result["status"] == "error":
                 self.mw.show_popup("Ошибка Эстафеты", "ИИ не смог собрать пакет.\nПридется переносить историю вручную.", is_error=True)
             else:
-                ai_summary = result["data"].get("thoughts", "")
+                commit_msg = result["data"].get("thoughts", "Автоматический коммит")
                 
-                mega_prompt = (
-                    "Привет! Это транзитный пакет (эстафета) из предыдущего чата. Мы продолжаем работу над нашим проектом.\n\n"
-                    "=== БРИФ ОТ ПРЕДЫДУЩЕГО ИИ (СТАТУС И ПЛАН) ===\n"
-                    f"{ai_summary}\n\n"
-                    "Пожалуйста, внимательно прочитай бриф и вникай в архитектуру.\n"
-                    "Для ответа используй СТРОГИЙ ФОРМАТ JSON согласно нашим правилам Оркестратора.\n"
-                    "В поле 'thoughts' напиши 'Контекст принял, план ясен, готов к работе', а массивы 'updates' и 'create_files' оставь пустыми []."
-                )
-                
-                clipboard = QApplication.clipboard()
-                clipboard.setText(mega_prompt)
-                
-                self.mw.chat_history.append("<span style='color: #31a24c;'><b>[СИСТЕМА] Транзитный пакет успешно скопирован в буфер обмена!</b></span>")
+                # --- НОВОЕ: Дублируем коммит в окно чата и сохраняем в лог ---
+                self.mw.chat_history.append(f"<br><span style='color: #4CAF50;'><b>[ИИ-Коммит]:</b> {commit_msg}</span>")
+                self.mw.chat_logger.log("AI", f"Сгенерирован коммит: {commit_msg}")
                 self.mw.scroll_chat()
+                # -------------------------------------------------------------
                 
-                self.mw.show_popup("Эстафета готова!", 
-                                "Мега-промпт (бриф + контекст) успешно скопирован в буфер обмена!\n\n"
-                                "1. Откройте новый чат Gemini (в другом браузере или аккаунте).\n"
-                                "2. Выберите эту новую вкладку в VibeCoder.\n"
-                                "3. Нажмите Ctrl+V прямо на сайте Gemini и отправьте.\n\n"
-                                "Работа будет бесшовно продолжена!")
+                if hasattr(self.mw, 'current_git_dialog') and self.mw.current_git_dialog and self.mw.current_git_dialog.isVisible():
+                    self.mw.current_git_dialog.text_input.setPlainText(commit_msg)
+                    self.mw.current_git_dialog.btn_ai.setText("✨ Сгенерировать ИИ-описание")
+                    self.mw.current_git_dialog.btn_ai.setEnabled(True)
+                else:
+                    self.mw.open_git_dialog(prefill_msg=commit_msg)
             return
             
         # --- ПЕРЕХВАТ ИИ-КОММИТА ---

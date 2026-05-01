@@ -74,8 +74,23 @@ class MainWindow(QMainWindow):
         
         self.combo_tabs = QComboBox()
         self.combo_tabs.setStyleSheet("""
-            QComboBox { background-color: #252526; color: white; border: 1px solid #3c3c3c; padding: 2px 10px; border-radius: 3px; font-weight: normal; }
+            QComboBox { 
+                background-color: #252526; 
+                color: white; 
+                border: 1px solid #3c3c3c; 
+                padding: 2px 10px; 
+                border-radius: 3px; 
+                font-weight: normal; 
+            }
             QComboBox::drop-down { border: none; }
+            /* НОВОЕ: Стили для выпадающего меню */
+            QComboBox QAbstractItemView {
+                background-color: #1e1e1e;
+                color: #d4d4d4;
+                selection-background-color: #0e639c;
+                selection-color: white;
+                border: 1px solid #3c3c3c;
+            }
         """)
         self.combo_tabs.setMinimumWidth(120)
         
@@ -257,6 +272,10 @@ class MainWindow(QMainWindow):
 
     def open_git_dialog(self, prefill_msg=""):
         self.git_workflow.open_git_dialog(prefill_msg)
+    
+    def request_ai_commit_message(self, diff_text):
+        self.ai_controller.request_ai_commit_message(diff_text)
+        
     # -----------------------------------------------
 
     def get_current_target_id(self):
