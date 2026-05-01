@@ -1,9 +1,10 @@
 import os
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QSplitter, 
                              QVBoxLayout, QPushButton, QMessageBox, QDialog, 
-                             QStatusBar, QTabWidget, QTextBrowser, QComboBox, QLabel)
+                             QStatusBar, QTabWidget, QTextBrowser, QComboBox, QLabel,
+                             QAbstractItemView)
 from PyQt6.QtCore import Qt, QDir, QUrl, QSettings, QEvent, QTimer
-from PyQt6.QtGui import QShortcut, QKeySequence
+from PyQt6.QtGui import QShortcut, QKeySequence, QStandardItemModel, QStandardItem
 
 from core.editor import DarkPythonEditor
 from core.ai_controller import AIController
@@ -18,14 +19,16 @@ from core.file_explorer import FileExplorerWidget
 from core.time_machine import TimeMachineDialog
 from core.git_manager import GitManager
 from core.api_settings_dialog import APISettingsDialog
-from core.terminal import TerminalWidget  # <--- ИМПОРТ НОВОГО ТЕРМИНАЛА
+from core.terminal import TerminalWidget
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("VibeCoder v1.19 — Terminal Edition (No Jumps)")
+        self.setWindowTitle("VibeCoder v1.19 — Terminal & Multi-Engine Edition")
         
         self.settings = QSettings("VibeCoder", "Preferences")
+        self.api_settings = QSettings("VibeCoder", "API_Config") # Настройки для API
+        
         self.attached_files = set()
         self.last_full_prompt = ""
         self.current_git_dialog = None
@@ -65,7 +68,7 @@ class MainWindow(QMainWindow):
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         
-        # Индикатор вкладок и Движка
+        # --- СЕЛЕКТОР ДВИЖКА (УМНЫЙ COMBOBOX) ---
         status_container = QWidget()
         status_layout = QHBoxLayout(status_container)
         status_layout.setContentsMargins(5, 0, 10, 0)
@@ -75,16 +78,26 @@ class MainWindow(QMainWindow):
         
         self.combo_engine = QComboBox()
         self.combo_engine.setStyleSheet("""
-            QComboBox { background-color: #252526; color: white; border: 1px solid #3c3c3c; padding: 2px 10px; border-radius: 3px; font-weight: normal; }
+            QComboBox { background-color: #252526; color: white; border: 1px solid #3c3c3c; padding: 2px 10px; border-radius: 3px; font-weight: bold; }
             QComboBox::drop-down { border: none; }
             QComboBox QAbstractItemView { background-color: #1e1e1e; color: #d4d4d4; selection-background-color: #0e639c; selection-color: white; border: 1px solid #3c3c3c; }
         """)
-        self.combo_engine.addItems(["🌐 Gemini Web (Браузер)", "🟢 OpenAI API", "🟣 Anthropic API", "🤖 Gemini API"])
-        self.combo_engine.setMinimumWidth(160)
+        self.combo_engine.setMinimumWidth(220)
         
-        last_engine = self.settings.value("last_engine", "🌐 Gemini Web (Браузер)")
-        self.combo_engine.setCurrentText(last_engine)
-        self.combo_engine.currentTextChanged.connect(lambda t: self.settings.setValue("last_engine", t))
+        # Создаем кастомную модель для ComboBox (чтобы делать заголовки некликабельными)
+        self.engine_model = QStandardItemModel()
+        self.combo_engine.setModel(self.engine_model)
+        
+        status_layout.addWidget(lbl_engine)
+        status_layout.addWidget(self.combo_engine)
+        
+        # Обновляем список движков при старте
+        self.refresh_engine_list()
+        
+        # Сохраняем выбор пользователя
+        self.combo_engine.currentTextChanged.connect(self._save_engine_selection)
+        
+        # ----------------------------------------
         
         lbl_browser = QLabel("Браузер: ")
         lbl_browser.setStyleSheet("color: #d4d4d4; font-weight: bold; margin-left: 10px;")
@@ -93,8 +106,6 @@ class MainWindow(QMainWindow):
         self.combo_tabs.setStyleSheet(self.combo_engine.styleSheet())
         self.combo_tabs.setMinimumWidth(120)
         
-        status_layout.addWidget(lbl_engine)
-        status_layout.addWidget(self.combo_engine)
         status_layout.addWidget(lbl_browser)
         status_layout.addWidget(self.combo_tabs)
         self.status_bar.addPermanentWidget(status_container)
@@ -114,7 +125,7 @@ class MainWindow(QMainWindow):
         self.chat_logger = ChatLogger(self.project_path)
         self.git_manager = GitManager(self.project_path)
         
-        # --- ПАНЕЛЬ 1: Левое дерево ---
+        # --- ПАНЕЛИ ---
         self.file_explorer = FileExplorerWidget(self.project_path)
         self.file_explorer.file_opened.connect(self.open_file)
         self.file_explorer.log_message.connect(self.log_system)
@@ -124,7 +135,6 @@ class MainWindow(QMainWindow):
         self.file_explorer.open_time_machine_signal.connect(self.open_time_machine)
         self.splitter.addWidget(self.file_explorer)
         
-        # --- ПАНЕЛЬ 2: Чат ---
         chat_widget = QWidget()
         chat_layout = QVBoxLayout(chat_widget)
         chat_layout.setContentsMargins(5, 5, 5, 5)
@@ -163,12 +173,10 @@ class MainWindow(QMainWindow):
         chat_layout.addWidget(chat_splitter)
         self.splitter.addWidget(chat_widget)
         
-        # --- ПАНЕЛЬ 3: Редактор кода + Терминал + Кнопки ---
         editor_widget = QWidget()
         editor_layout = QVBoxLayout(editor_widget)
         editor_layout.setContentsMargins(5, 5, 5, 5)
         
-        # ВЕРТИКАЛЬНЫЙ СПЛИТТЕР ДЛЯ РЕДАКТОРА И ТЕРМИНАЛА
         self.editor_splitter = QSplitter(Qt.Orientation.Vertical)
         
         self.editor_tabs = QTabWidget()
@@ -180,55 +188,46 @@ class MainWindow(QMainWindow):
         self.editor.zoomTo(self.editor_zoom)
         self.editor.installEventFilter(self)
         
-        # ДОБАВЛЯЕМ ТЕРМИНАЛ
         self.terminal = TerminalWidget(self.project_path)
-        self.terminal.setVisible(False) # По умолчанию скрыт
+        self.terminal.setVisible(False) 
         self.editor_splitter.addWidget(self.terminal)
         
-        self.editor_splitter.setSizes([700, 300]) # 70% редактор, 30% терминал
+        self.editor_splitter.setSizes([700, 300]) 
         editor_layout.addWidget(self.editor_splitter)
         
-        # --- НИЖНЯЯ ПАНЕЛЬ КНОПОК ---
         bottom_btn_layout = QHBoxLayout()
         bottom_btn_layout.setSpacing(5)
         
         self.btn_send = QPushButton("➤ Отправить")
-        self.btn_send.setToolTip("Отправить ИИ (Горячая клавиша: Ctrl + Enter)")
         self.btn_send.setFixedHeight(35)
         self.btn_send.setStyleSheet("background-color: #b58900; color: #1e1e1e; font-weight: bold; border-radius: 4px;")
         
         self.btn_pause = QPushButton("■ Пауза")
-        self.btn_pause.setToolTip("Пауза / Стоп")
         self.btn_pause.setCheckable(True)
         self.btn_pause.setFixedHeight(35)
         self.btn_pause.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold; border-radius: 4px;")
         self.btn_pause.clicked.connect(self.toggle_pause)
         
         self.btn_history = QPushButton("📜")
-        self.btn_history.setToolTip("Умная история проекта")
         self.btn_history.setFixedHeight(35)
         self.btn_history.setStyleSheet("background-color: #333333; color: white; font-size: 16px; border-radius: 4px;")
         self.btn_history.clicked.connect(self.show_history)
         
         self.btn_relay = QPushButton("🔄")
-        self.btn_relay.setToolTip("Сформировать ИИ-Эстафету (Транзитный пакет)")
         self.btn_relay.setFixedHeight(35)
         self.btn_relay.setStyleSheet("background-color: #005f73; color: white; font-size: 16px; border-radius: 4px;")
         
         self.btn_terminal = QPushButton("💻 Терминал")
-        self.btn_terminal.setToolTip("Открыть/Скрыть встроенную консоль (cmd)")
         self.btn_terminal.setCheckable(True)
         self.btn_terminal.setFixedHeight(35)
         self.btn_terminal.setStyleSheet("background-color: #333333; color: white; font-weight: bold; border-radius: 4px;")
         self.btn_terminal.clicked.connect(self.toggle_terminal)
         
         self.btn_git = QPushButton("📦 Git")
-        self.btn_git.setToolTip("Управление версиями (Git)")
         self.btn_git.setFixedHeight(35)
         self.btn_git.setStyleSheet("background-color: #4a148c; color: white; font-weight: bold; border-radius: 4px;")
 
         self.btn_api = QPushButton("⚙️ API")
-        self.btn_api.setToolTip("Настройки API (Ключи и Провайдеры)")
         self.btn_api.setFixedHeight(35)
         self.btn_api.setStyleSheet("background-color: #333333; color: white; font-weight: bold; border-radius: 4px;")
         self.btn_api.clicked.connect(self.open_api_settings)
@@ -246,7 +245,7 @@ class MainWindow(QMainWindow):
         bottom_btn_layout.addWidget(self.btn_pause, 2)
         bottom_btn_layout.addWidget(self.btn_history, 1)
         bottom_btn_layout.addWidget(self.btn_relay, 1)
-        bottom_btn_layout.addWidget(self.btn_terminal, 2) # Кнопка терминала
+        bottom_btn_layout.addWidget(self.btn_terminal, 2)
         bottom_btn_layout.addWidget(self.btn_git, 2)
         bottom_btn_layout.addWidget(self.btn_api, 1)
         bottom_btn_layout.addWidget(self.btn_reject_main, 2)
@@ -267,7 +266,6 @@ class MainWindow(QMainWindow):
         self.shortcut_save = QShortcut(QKeySequence("Ctrl+S"), self)
         self.shortcut_save.activated.connect(self.code_applier.manual_save)
         
-        # ГОРЯЧАЯ КЛАВИША ТЕРМИНАЛА (Ctrl + ~)
         self.shortcut_terminal = QShortcut(QKeySequence("Ctrl+`"), self)
         self.shortcut_terminal.activated.connect(self.btn_terminal.click)
         
@@ -284,7 +282,76 @@ class MainWindow(QMainWindow):
 
         self.update_git_status()
 
-    # --- ЛОГИКА ТЕРМИНАЛА ---
+    # --- МЕТОДЫ СЕЛЕКТОРА ДВИЖКА ---
+    def _add_engine_category(self, title):
+        """Добавляет некликабельный заголовок-категорию"""
+        item = QStandardItem(title)
+        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable & ~Qt.ItemFlag.ItemIsEnabled)
+        item.setData(title, Qt.ItemDataRole.DisplayRole)
+        # Делаем заголовок серым и центруем
+        item.setForeground(Qt.GlobalColor.darkGray)
+        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.engine_model.appendRow(item)
+
+    def _add_engine_item(self, text, icon=""):
+        """Добавляет кликабельную модель"""
+        item = QStandardItem(f"  {icon} {text}" if icon else f"  {text}")
+        # Сохраняем "чистое" имя модели в UserRole для удобного извлечения
+        item.setData(text, Qt.ItemDataRole.UserRole)
+        self.engine_model.appendRow(item)
+
+    def refresh_engine_list(self):
+        """Перестраивает выпадающий список движков, читая рабочие модели из QSettings"""
+        self.combo_engine.blockSignals(True)
+        self.engine_model.clear()
+        
+        # 1. Браузер (Всегда доступен)
+        self._add_engine_category("--- БРАУЗЕР (ВКЛАДКИ) ---")
+        self._add_engine_item("Gemini Web", icon="🌐")
+        
+        # 2. OpenAI
+        oai_models = self.api_settings.value("openai_verified", [])
+        if oai_models:
+            self._add_engine_category("--- OPENAI API ---")
+            for m in oai_models:
+                self._add_engine_item(m, icon="🟢")
+                
+        # 3. Anthropic
+        ant_models = self.api_settings.value("anthropic_verified", [])
+        if ant_models:
+            self._add_engine_category("--- ANTHROPIC API ---")
+            for m in ant_models:
+                self._add_engine_item(m, icon="🟣")
+                
+        # 4. Gemini API
+        gem_models = self.api_settings.value("gemini_verified", [])
+        if gem_models:
+            self._add_engine_category("--- GEMINI API ---")
+            for m in gem_models:
+                self._add_engine_item(m, icon="🤖")
+
+        # Восстанавливаем последний выбор
+        last_selection = self.settings.value("last_engine", "  🌐 Gemini Web")
+        index = self.combo_engine.findText(last_selection)
+        if index >= 0:
+            self.combo_engine.setCurrentIndex(index)
+        else:
+            # Если последней модели больше нет (например, её удалили из API), выбираем Браузер
+            self.combo_engine.setCurrentIndex(1) # Индекс 1, т.к. 0 это заголовок
+            
+        self.combo_engine.blockSignals(False)
+
+    def _save_engine_selection(self, text):
+        """Сохраняет выбор при смене движка в комбобоксе"""
+        self.settings.setValue("last_engine", text)
+
+    def open_api_settings(self):
+        """Открывает настройки и обновляет список движков при закрытии"""
+        dialog = APISettingsDialog(self)
+        if dialog.exec():
+            self.refresh_engine_list()
+    # --------------------------------
+
     def toggle_terminal(self):
         if self.btn_terminal.isChecked():
             self.terminal.setVisible(True)
@@ -293,7 +360,6 @@ class MainWindow(QMainWindow):
         else:
             self.terminal.setVisible(False)
             self.btn_terminal.setStyleSheet("background-color: #333333; color: white; font-weight: bold; border-radius: 4px;")
-    # ------------------------
 
     def on_tab_manually_changed(self, index):
         if index >= 0:
@@ -319,10 +385,6 @@ class MainWindow(QMainWindow):
     def request_ai_commit_message(self, diff_text):
         self.ai_controller.request_ai_commit_message(diff_text)
 
-    def open_api_settings(self):
-        dialog = APISettingsDialog(self)
-        dialog.exec()
-
     def eventFilter(self, obj, event):
         if obj == self.editor and event.type() == QEvent.Type.Wheel:
             if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
@@ -341,8 +403,6 @@ class MainWindow(QMainWindow):
         self.chat_logger = ChatLogger(new_path)
         self.git_manager = GitManager(new_path)
         self.prompt_input.project_path = new_path
-        
-        # ОБНОВЛЯЕМ ПУТЬ В ТЕРМИНАЛЕ
         self.terminal.update_project_path(new_path)
         self.update_git_status()
 

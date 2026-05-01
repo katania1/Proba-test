@@ -98,32 +98,41 @@ class AIController(QObject):
             self.execute_api_task(engine)
 
     def execute_api_task(self, engine):
-        """Новый метод для Фазы 18: запускает прямой запрос к API в отдельном потоке"""
+        """Запускает прямой запрос к API в отдельном потоке"""
         settings = QSettings("VibeCoder", "API_Config")
         provider = None
+        selected_model = ""
         
         try:
             if "OpenAI" in engine:
                 key = settings.value("openai_api_key", "")
                 url = settings.value("openai_base_url", "https://api.openai.com/v1")
+                selected_model = settings.value("openai_model", "gpt-4o")
                 if not key: raise Exception("API ключ OpenAI не задан! Откройте ⚙️ API.")
                 provider = OpenAIProvider(key, url)
             
             elif "Anthropic" in engine:
                 key = settings.value("anthropic_api_key", "")
                 url = settings.value("anthropic_base_url", "https://api.anthropic.com")
+                selected_model = settings.value("anthropic_model", "claude-3-5-sonnet-20241022")
                 if not key: raise Exception("API ключ Anthropic не задан! Откройте ⚙️ API.")
                 provider = AnthropicProvider(key, url)
                 
             elif "Gemini API" in engine:
                 key = settings.value("gemini_api_key", "")
+                selected_model = settings.value("gemini_model", "gemini-1.5-pro")
                 if not key: raise Exception("API ключ Gemini не задан! Откройте ⚙️ API.")
                 provider = GeminiAPIProvider(key)
 
             if provider:
-                self.mw.log_system(f"Отправка прямого запроса через {engine}...")
+                self.mw.log_system(f"Отправка запроса через {engine} (Модель: {selected_model})...")
                 
-                # Создаем воркер и привязываем его к стандартному обработчику
+                # Мы не можем передать model напрямую в APIWorker, если не меняли его подпись.
+                # Сделаем костыль: подменим дефолтную генерацию через лямбду или обновим свойства самого провайдера.
+                # Но проще всего просто обернуть provider.generate
+                original_generate = provider.generate
+                provider.generate = lambda p, sp: original_generate(p, sp, model=selected_model)
+                
                 self.worker = APIWorker(provider, self.mw.last_full_prompt, self.orchestrator.system_prompt)
                 self.worker.finished_signal.connect(self.process_ai_response)
                 self.worker.error_signal.connect(lambda err: self.mw.log_system(f"ОШИБКА API: {err}", color="#ff4444"))
