@@ -18,11 +18,12 @@ from core.file_explorer import FileExplorerWidget
 from core.time_machine import TimeMachineDialog
 from core.git_manager import GitManager
 from core.api_settings_dialog import APISettingsDialog
+from core.terminal import TerminalWidget  # <--- ИМПОРТ НОВОГО ТЕРМИНАЛА
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("VibeCoder v1.18 — Ultimate MVC Edition (No Jumps)")
+        self.setWindowTitle("VibeCoder v1.19 — Terminal Edition (No Jumps)")
         
         self.settings = QSettings("VibeCoder", "Preferences")
         self.attached_files = set()
@@ -47,7 +48,7 @@ class MainWindow(QMainWindow):
         """)
         
         screen = self.screen().availableGeometry()
-        self.resize(min(1350, screen.width() - 50), min(900, screen.height() - 50))
+        self.resize(min(1450, screen.width() - 50), min(950, screen.height() - 50))
         
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
@@ -64,41 +65,40 @@ class MainWindow(QMainWindow):
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         
-        # Индикатор вкладок
+        # Индикатор вкладок и Движка
         status_container = QWidget()
         status_layout = QHBoxLayout(status_container)
         status_layout.setContentsMargins(5, 0, 10, 0)
         
+        lbl_engine = QLabel("Движок: ")
+        lbl_engine.setStyleSheet("color: #d4d4d4; font-weight: bold; margin-left: 10px;")
+        
+        self.combo_engine = QComboBox()
+        self.combo_engine.setStyleSheet("""
+            QComboBox { background-color: #252526; color: white; border: 1px solid #3c3c3c; padding: 2px 10px; border-radius: 3px; font-weight: normal; }
+            QComboBox::drop-down { border: none; }
+            QComboBox QAbstractItemView { background-color: #1e1e1e; color: #d4d4d4; selection-background-color: #0e639c; selection-color: white; border: 1px solid #3c3c3c; }
+        """)
+        self.combo_engine.addItems(["🌐 Gemini Web (Браузер)", "🟢 OpenAI API", "🟣 Anthropic API", "🤖 Gemini API"])
+        self.combo_engine.setMinimumWidth(160)
+        
+        last_engine = self.settings.value("last_engine", "🌐 Gemini Web (Браузер)")
+        self.combo_engine.setCurrentText(last_engine)
+        self.combo_engine.currentTextChanged.connect(lambda t: self.settings.setValue("last_engine", t))
+        
         lbl_browser = QLabel("Браузер: ")
-        lbl_browser.setStyleSheet("color: #d4d4d4; font-weight: bold;")
+        lbl_browser.setStyleSheet("color: #d4d4d4; font-weight: bold; margin-left: 10px;")
         
         self.combo_tabs = QComboBox()
-        # ИСПРАВЛЕНО: Стили для невидимого шрифта вкладок (QAbstractItemView)
-        self.combo_tabs.setStyleSheet("""
-            QComboBox { 
-                background-color: #252526; 
-                color: white; 
-                border: 1px solid #3c3c3c; 
-                padding: 2px 10px; 
-                border-radius: 3px; 
-                font-weight: normal; 
-            }
-            QComboBox::drop-down { border: none; }
-            QComboBox QAbstractItemView {
-                background-color: #1e1e1e;
-                color: #d4d4d4;
-                selection-background-color: #0e639c;
-                selection-color: white;
-                border: 1px solid #3c3c3c;
-            }
-        """)
+        self.combo_tabs.setStyleSheet(self.combo_engine.styleSheet())
         self.combo_tabs.setMinimumWidth(120)
         
+        status_layout.addWidget(lbl_engine)
+        status_layout.addWidget(self.combo_engine)
         status_layout.addWidget(lbl_browser)
         status_layout.addWidget(self.combo_tabs)
         self.status_bar.addPermanentWidget(status_container)
         
-        # ИСПРАВЛЕНО: Жесткая память выбранной вкладки (Anti-Jump)
         self.locked_tab_id = None
         self.combo_tabs.currentIndexChanged.connect(self.on_tab_manually_changed)
         
@@ -163,20 +163,32 @@ class MainWindow(QMainWindow):
         chat_layout.addWidget(chat_splitter)
         self.splitter.addWidget(chat_widget)
         
-        # --- ПАНЕЛЬ 3: Редактор кода + Кнопки ---
+        # --- ПАНЕЛЬ 3: Редактор кода + Терминал + Кнопки ---
         editor_widget = QWidget()
         editor_layout = QVBoxLayout(editor_widget)
         editor_layout.setContentsMargins(5, 5, 5, 5)
         
+        # ВЕРТИКАЛЬНЫЙ СПЛИТТЕР ДЛЯ РЕДАКТОРА И ТЕРМИНАЛА
+        self.editor_splitter = QSplitter(Qt.Orientation.Vertical)
+        
         self.editor_tabs = QTabWidget()
         self.editor = DarkPythonEditor()
         self.editor_tabs.addTab(self.editor, "Ничего не открыто")
-        editor_layout.addWidget(self.editor_tabs)
+        self.editor_splitter.addWidget(self.editor_tabs)
         
         self.editor_zoom = self.settings.value("editor_zoom", 0, type=int)
         self.editor.zoomTo(self.editor_zoom)
         self.editor.installEventFilter(self)
         
+        # ДОБАВЛЯЕМ ТЕРМИНАЛ
+        self.terminal = TerminalWidget(self.project_path)
+        self.terminal.setVisible(False) # По умолчанию скрыт
+        self.editor_splitter.addWidget(self.terminal)
+        
+        self.editor_splitter.setSizes([700, 300]) # 70% редактор, 30% терминал
+        editor_layout.addWidget(self.editor_splitter)
+        
+        # --- НИЖНЯЯ ПАНЕЛЬ КНОПОК ---
         bottom_btn_layout = QHBoxLayout()
         bottom_btn_layout.setSpacing(5)
         
@@ -203,6 +215,13 @@ class MainWindow(QMainWindow):
         self.btn_relay.setFixedHeight(35)
         self.btn_relay.setStyleSheet("background-color: #005f73; color: white; font-size: 16px; border-radius: 4px;")
         
+        self.btn_terminal = QPushButton("💻 Терминал")
+        self.btn_terminal.setToolTip("Открыть/Скрыть встроенную консоль (cmd)")
+        self.btn_terminal.setCheckable(True)
+        self.btn_terminal.setFixedHeight(35)
+        self.btn_terminal.setStyleSheet("background-color: #333333; color: white; font-weight: bold; border-radius: 4px;")
+        self.btn_terminal.clicked.connect(self.toggle_terminal)
+        
         self.btn_git = QPushButton("📦 Git")
         self.btn_git.setToolTip("Управление версиями (Git)")
         self.btn_git.setFixedHeight(35)
@@ -215,13 +234,11 @@ class MainWindow(QMainWindow):
         self.btn_api.clicked.connect(self.open_api_settings)
         
         self.btn_reject_main = QPushButton("❌ Отклонить")
-        self.btn_reject_main.setToolTip("Отклонить предложенный код")
         self.btn_reject_main.setFixedHeight(35)
         self.btn_reject_main.setStyleSheet("background-color: #512525; color: white; font-weight: bold; border-radius: 4px;")
         self.btn_reject_main.setVisible(False)
         
         self.btn_approve = QPushButton("✅ Утвердить код")
-        self.btn_approve.setToolTip("Открыть окно ревью (Diff)")
         self.btn_approve.setFixedHeight(35)
         self.btn_approve.setStyleSheet("background-color: #2e7d32; color: white; font-weight: bold; border-radius: 4px;") 
         
@@ -229,6 +246,7 @@ class MainWindow(QMainWindow):
         bottom_btn_layout.addWidget(self.btn_pause, 2)
         bottom_btn_layout.addWidget(self.btn_history, 1)
         bottom_btn_layout.addWidget(self.btn_relay, 1)
+        bottom_btn_layout.addWidget(self.btn_terminal, 2) # Кнопка терминала
         bottom_btn_layout.addWidget(self.btn_git, 2)
         bottom_btn_layout.addWidget(self.btn_api, 1)
         bottom_btn_layout.addWidget(self.btn_reject_main, 2)
@@ -243,15 +261,18 @@ class MainWindow(QMainWindow):
         self.retry_count = 0        
         self.memory_old_code = None 
 
-        # --- ИНИЦИАЛИЗАЦИЯ НОВЫХ МОДУЛЕЙ АРХИТЕКТУРЫ ---
         self.code_applier = CodeApplier(self)
         self.git_workflow = GitWorkflow(self)
         
         self.shortcut_save = QShortcut(QKeySequence("Ctrl+S"), self)
         self.shortcut_save.activated.connect(self.code_applier.manual_save)
+        
+        # ГОРЯЧАЯ КЛАВИША ТЕРМИНАЛА (Ctrl + ~)
+        self.shortcut_terminal = QShortcut(QKeySequence("Ctrl+`"), self)
+        self.shortcut_terminal.activated.connect(self.btn_terminal.click)
+        
         self.btn_approve.clicked.connect(self.code_applier.review_and_approve)
         self.btn_reject_main.clicked.connect(self.code_applier.reject_preview)
-        
         self.btn_git.clicked.connect(self.git_workflow.open_git_dialog)
         
         self.ai_controller = AIController(self)
@@ -260,11 +281,20 @@ class MainWindow(QMainWindow):
         self.btn_send.clicked.connect(self.ai_controller.send_task)
         self.prompt_input.send_signal.connect(self.ai_controller.send_task)
         self.btn_relay.clicked.connect(self.ai_controller.force_relay)
-        # -----------------------------------------------
 
         self.update_git_status()
 
-    # --- СТРОГАЯ БЛОКИРОВКА ВКЛАДКИ ---
+    # --- ЛОГИКА ТЕРМИНАЛА ---
+    def toggle_terminal(self):
+        if self.btn_terminal.isChecked():
+            self.terminal.setVisible(True)
+            self.btn_terminal.setStyleSheet("background-color: #0e639c; color: white; font-weight: bold; border-radius: 4px;")
+            self.terminal.input_line.setFocus()
+        else:
+            self.terminal.setVisible(False)
+            self.btn_terminal.setStyleSheet("background-color: #333333; color: white; font-weight: bold; border-radius: 4px;")
+    # ------------------------
+
     def on_tab_manually_changed(self, index):
         if index >= 0:
             text = self.combo_tabs.itemText(index)
@@ -273,9 +303,7 @@ class MainWindow(QMainWindow):
 
     def get_current_target_id(self):
         return self.locked_tab_id
-    # ----------------------------------
 
-    # --- ПРОКСИ-МЕТОДЫ (Связки для других компонентов) ---
     def is_path_safe(self, file_path):
         return self.code_applier.is_path_safe(file_path)
 
@@ -290,7 +318,6 @@ class MainWindow(QMainWindow):
         
     def request_ai_commit_message(self, diff_text):
         self.ai_controller.request_ai_commit_message(diff_text)
-    # -----------------------------------------------------
 
     def open_api_settings(self):
         dialog = APISettingsDialog(self)
@@ -314,6 +341,9 @@ class MainWindow(QMainWindow):
         self.chat_logger = ChatLogger(new_path)
         self.git_manager = GitManager(new_path)
         self.prompt_input.project_path = new_path
+        
+        # ОБНОВЛЯЕМ ПУТЬ В ТЕРМИНАЛЕ
+        self.terminal.update_project_path(new_path)
         self.update_git_status()
 
     def handle_tree_tags(self, files, is_attach):
@@ -414,14 +444,12 @@ class MainWindow(QMainWindow):
         scrollbar = self.chat_history.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
-    # --- ИСПРАВЛЕНИЕ: Жесткая привязка вкладок (Anti-Jump) ---
     def update_tabs_ui(self):
         if not hasattr(self, 'ai_controller') or not hasattr(self.ai_controller.bridge, 'get_active_tabs'):
             return
             
         raw_tabs = self.ai_controller.bridge.get_active_tabs()
 
-        # Если вкладок нет вообще - показываем "Нет связи"
         if not raw_tabs:
             if self.combo_tabs.count() != 1 or self.combo_tabs.itemText(0) != "🔴 Нет связи":
                 self.combo_tabs.blockSignals(True)
@@ -430,14 +458,12 @@ class MainWindow(QMainWindow):
                 self.combo_tabs.blockSignals(False)
             return
 
-        # 1. Собираем пришедшие вкладки в словарь {ID: "Полный текст"}
         incoming_tabs = {}
         for t in raw_tabs:
             if "[" in t and "]" in t:
                 t_id = t.split("[")[-1].split("]")[0]
                 incoming_tabs[t_id] = f"🟢 {t}"
 
-        # 2. Собираем ТЕКУЩИЕ вкладки в комбобоксе {ID: (Индекс, "Текущий текст")}
         current_tabs = {}
         for i in range(self.combo_tabs.count()):
             text = self.combo_tabs.itemText(i)
@@ -445,27 +471,21 @@ class MainWindow(QMainWindow):
                 t_id = text.split("[")[-1].split("]")[0]
                 current_tabs[t_id] = (i, text)
 
-        # 3. СРАВНИВАЕМ НАБОРЫ ID
         if set(incoming_tabs.keys()) == set(current_tabs.keys()):
-            # Вкладки физически те же самые! Никто ничего не закрыл и не открыл.
-            # Значит, мы НИЧЕГО не удаляем и не меняем индексы. Просто тихо обновляем текст.
             self.combo_tabs.blockSignals(True)
             for t_id, (index, old_text) in current_tabs.items():
                 new_text = incoming_tabs[t_id]
                 if old_text != new_text:
-                    self.combo_tabs.setItemText(index, new_text) # Тихо меняем текст (например, на "Gemini печатает")
+                    self.combo_tabs.setItemText(index, new_text)
             self.combo_tabs.blockSignals(False)
             return
 
-        # 4. Если мы дошли сюда, значит вкладку реально закрыли или открыли новую.
-        # Делаем полную перерисовку, сортируя СТРОГО по ID (чтобы они никогда не прыгали)
         self.combo_tabs.blockSignals(True)
         self.combo_tabs.clear()
 
         for t_id in sorted(incoming_tabs.keys()):
             self.combo_tabs.addItem(incoming_tabs[t_id])
 
-        # Восстанавливаем фокус
         if self.locked_tab_id:
             for i in range(self.combo_tabs.count()):
                 if f"[{self.locked_tab_id}]" in self.combo_tabs.itemText(i):

@@ -1,11 +1,16 @@
 import os
 import re
 import json
-from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QObject, pyqtSignal, QSettings
 from PyQt6.QtWidgets import QMessageBox, QApplication, QDialog
 
 from core.ai_orchestrator import AIOrchestrator
 from core.bridge import VibeBridge
+
+# --- НОВЫЕ ИМПОРТЫ ДЛЯ ФАЗЫ 18 ---
+from core.api_worker import APIWorker
+from core.providers import OpenAIProvider, AnthropicProvider, GeminiAPIProvider
+# ---------------------------------
 
 class AIController(QObject):
     ai_response_signal = pyqtSignal(str)
@@ -38,13 +43,17 @@ class AIController(QObject):
         user_text = self.mw.prompt_input.toPlainText().strip()
         if not user_text: return
         
+        # Получаем выбранный движок и вкладку
+        engine = self.mw.combo_engine.currentText()
         target_id = self.mw.get_current_target_id()
         selected_tab = self.mw.combo_tabs.currentText()
         
-        if "🔴" in selected_tab:
+        # Блокировка: если выбран браузер, а он мертв
+        if "Браузер" in engine and "🔴" in selected_tab:
             self.mw.show_popup("Ошибка связи", "Нет активных вкладок браузера!\nОткройте Gemini и обновите страницу.", is_error=True)
             return
 
+        # Сбор прикрепленных файлов
         attached_blocks = []
         tags_in_text = re.findall(r'@\[.*?\]|@[\w\.\-\/\\]+', user_text)
         for tag in tags_in_text:
@@ -58,7 +67,12 @@ class AIController(QObject):
         
         self.mw.chat_logger.log("USER", user_text)
         
-        tab_display_name = selected_tab.split(" [")[0].replace("🟢 ", "")
+        # Определяем красивое имя для отображения в чате (Имя вкладки или Имя API)
+        if "Браузер" in engine:
+            tab_display_name = selected_tab.split(" [")[0].replace("🟢 ", "")
+        else:
+            tab_display_name = engine.split(" ")[1] # Достаем слово "OpenAI", "Anthropic", и тд
+            
         self.mw.chat_history.append(f"<br><span style='color: #569cd6;'><b>ВЫ</b> (в <i>{tab_display_name}</i>)<b>:</b> {user_text}</span>")
         self.mw.chat_history.append(f"<a href='view_prompt:last' style='color: #65676b; font-size: 10px;'>[Показать сырой промпт]</a>")
             
@@ -74,11 +88,50 @@ class AIController(QObject):
         self.mw.tokens_sent += self.estimate_tokens(self.mw.last_full_prompt)
         self.mw.update_status_bar()
         self.retry_count = 0 
-        
-        self.bridge.add_task(self.mw.last_full_prompt, is_relay=False, target_id=target_id)
-        
-        self.mw.log_system(f"Задача отправлена в {tab_display_name}. Ожидание ответа...")
         self.mw.prompt_input.clear()
+        
+        # --- РОУТИНГ ЗАДАЧИ ---
+        if "Браузер" in engine:
+            self.bridge.add_task(self.mw.last_full_prompt, is_relay=False, target_id=target_id)
+            self.mw.log_system(f"Задача отправлена в {tab_display_name}. Ожидание ответа...")
+        else:
+            self.execute_api_task(engine)
+
+    def execute_api_task(self, engine):
+        """Новый метод для Фазы 18: запускает прямой запрос к API в отдельном потоке"""
+        settings = QSettings("VibeCoder", "API_Config")
+        provider = None
+        
+        try:
+            if "OpenAI" in engine:
+                key = settings.value("openai_api_key", "")
+                url = settings.value("openai_base_url", "https://api.openai.com/v1")
+                if not key: raise Exception("API ключ OpenAI не задан! Откройте ⚙️ API.")
+                provider = OpenAIProvider(key, url)
+            
+            elif "Anthropic" in engine:
+                key = settings.value("anthropic_api_key", "")
+                url = settings.value("anthropic_base_url", "https://api.anthropic.com")
+                if not key: raise Exception("API ключ Anthropic не задан! Откройте ⚙️ API.")
+                provider = AnthropicProvider(key, url)
+                
+            elif "Gemini API" in engine:
+                key = settings.value("gemini_api_key", "")
+                if not key: raise Exception("API ключ Gemini не задан! Откройте ⚙️ API.")
+                provider = GeminiAPIProvider(key)
+
+            if provider:
+                self.mw.log_system(f"Отправка прямого запроса через {engine}...")
+                
+                # Создаем воркер и привязываем его к стандартному обработчику
+                self.worker = APIWorker(provider, self.mw.last_full_prompt, self.orchestrator.system_prompt)
+                self.worker.finished_signal.connect(self.process_ai_response)
+                self.worker.error_signal.connect(lambda err: self.mw.log_system(f"ОШИБКА API: {err}", color="#ff4444"))
+                self.worker.start()
+                
+        except Exception as e:
+            self.mw.show_popup("Ошибка конфигурации API", str(e), is_error=True)
+            self.mw.log_system(f"Сбой запуска API: {str(e)}", color="#ff4444")
 
     def request_ai_commit_message(self, diff_text):
         self.is_waiting_for_commit_msg = True 
@@ -108,7 +161,12 @@ class AIController(QObject):
         self.mw.update_status_bar()
         self.retry_count = 0
 
-        self.bridge.add_task(self.mw.last_full_prompt, target_id=self.mw.get_current_target_id())
+        # РОУТИНГ ДЛЯ КОММИТА
+        engine = self.mw.combo_engine.currentText()
+        if "Браузер" in engine:
+            self.bridge.add_task(self.mw.last_full_prompt, target_id=self.mw.get_current_target_id())
+        else:
+            self.execute_api_task(engine)
 
     def force_relay(self):
         self.is_waiting_for_relay_msg = True
@@ -141,7 +199,12 @@ class AIController(QObject):
         self.mw.update_status_bar()
         self.retry_count = 0
         
-        self.bridge.add_task(self.mw.last_full_prompt, target_id=self.mw.get_current_target_id())
+        # РОУТИНГ ДЛЯ ЭСТАФЕТЫ
+        engine = self.mw.combo_engine.currentText()
+        if "Браузер" in engine:
+            self.bridge.add_task(self.mw.last_full_prompt, target_id=self.mw.get_current_target_id())
+        else:
+            self.execute_api_task(engine)
 
     def send_requested_files(self, file_paths):
         attached_blocks = []
@@ -170,8 +233,13 @@ class AIController(QObject):
         self.mw.update_status_bar()
         self.retry_count = 0 
         
-        self.bridge.add_task(self.mw.last_full_prompt, target_id=self.mw.get_current_target_id())
-        self.mw.log_system("Файлы отправлены. Ожидание ответа...")
+        # РОУТИНГ ДЛЯ ФАЙЛОВ
+        engine = self.mw.combo_engine.currentText()
+        if "Браузер" in engine:
+            self.bridge.add_task(self.mw.last_full_prompt, target_id=self.mw.get_current_target_id())
+            self.mw.log_system("Файлы отправлены. Ожидание ответа...")
+        else:
+            self.execute_api_task(engine)
 
     def process_limit_reached(self):
         if not self.mw.btn_pause.isChecked():
@@ -268,7 +336,7 @@ class AIController(QObject):
         # --- СТАНДАРТНАЯ ОБРАБОТКА КОДА ---
         self.mw.tokens_received += self.estimate_tokens(raw_text)
         self.mw.update_status_bar()
-        self.mw.chat_history.append("<span style='color: #bb86fc;'><b>[GEMINI] Ответ получен. Проверка и патчинг...</b></span>")
+        self.mw.chat_history.append("<span style='color: #bb86fc;'><b>[GEMINI/API] Ответ получен. Проверка и патчинг...</b></span>")
         result = self.orchestrator.parse_and_validate_response(raw_text)
         
         if result["status"] == "error":
@@ -283,7 +351,17 @@ class AIController(QObject):
             self.mw.log_system(f"ОШИБКА ИИ: {result['error_message']}", color="#ff4444")
             self.mw.log_system(f"Авто-исправление (Попытка {self.retry_count} из 2)...", color="#ffaa00")
             fix_prompt = (f"Твой предыдущий ответ вызвал фатальную ошибку: {result['error_message']}\nКАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать извинения вне JSON.\nВот исходная задача. Пришли чистый JSON для неё:\n{self.mw.last_full_prompt}\n")
-            self.bridge.add_task(fix_prompt, target_id=self.mw.get_current_target_id())
+            
+            # РОУТИНГ АВТО-ИСПРАВЛЕНИЯ
+            engine = self.mw.combo_engine.currentText()
+            if "Браузер" in engine:
+                self.bridge.add_task(fix_prompt, target_id=self.mw.get_current_target_id())
+            else:
+                # Временно подменяем промпт, чтобы отправить фикс через APIWorker
+                old_prompt = self.mw.last_full_prompt
+                self.mw.last_full_prompt = fix_prompt
+                self.execute_api_task(engine)
+                self.mw.last_full_prompt = old_prompt
         else:
             self.retry_count = 0 
             data = result["data"]
@@ -371,7 +449,16 @@ class AIController(QObject):
                             self.mw.log_system(f"ИИ ОШИБСЯ С КОНТЕКСТОМ! Блок не найден в {rel_path}. Запрос переделки...", color="#ffaa00")
                             self.retry_count += 1
                             error_prompt = f"Твой ответ отклонен системой (Smart Diff Error).\nЯ не нашел следующий блок 'search' в файле {rel_path}:\n```python\n{failed_search_block}\n```\nПожалуйста, скопируй ТОЧНЫЕ строки из моего исходного файла в поле 'search'. Или оставь 'search' пустым, если пишешь файл с нуля. Повтори JSON."
-                            self.bridge.add_task(error_prompt, target_id=self.mw.get_current_target_id())
+                            
+                            # РОУТИНГ ФИКСА ДИФФА
+                            engine = self.mw.combo_engine.currentText()
+                            if "Браузер" in engine:
+                                self.bridge.add_task(error_prompt, target_id=self.mw.get_current_target_id())
+                            else:
+                                old_prompt = self.mw.last_full_prompt
+                                self.mw.last_full_prompt = error_prompt
+                                self.execute_api_task(engine)
+                                self.mw.last_full_prompt = old_prompt
                             return
                         
                         update["code"] = patched_code
