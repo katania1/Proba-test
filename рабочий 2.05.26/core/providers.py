@@ -1,12 +1,5 @@
 import requests
-import base64
-import mimetypes
 from abc import ABC, abstractmethod
-
-def encode_image(image_path):
-    """Читает картинку и кодирует её в Base64"""
-    with open(image_path, "rb") as image_file:
-        return base64.b64encode(image_file.read()).decode('utf-8')
 
 class AbstractProvider(ABC):
     def __init__(self, api_key, base_url=None):
@@ -14,93 +7,69 @@ class AbstractProvider(ABC):
         self.base_url = base_url
 
     @abstractmethod
-    def generate(self, prompt: str, system_prompt: str = "", model: str = "", image_paths: list = None) -> str:
+    def generate(self, prompt: str, system_prompt: str = "", model: str = "") -> str:
+        """Отправляет запрос к API и возвращает сгенерированный ответ (строку)."""
         pass
 
     @abstractmethod
     def get_models(self) -> list:
+        """Запрашивает теоретический список доступных моделей у провайдера."""
         pass
 
     @abstractmethod
     def verify_model(self, model: str) -> tuple[bool, str]:
+        """Делает микро-запрос для проверки реального доступа к модели (баланс/лимиты)."""
         pass
 
 class OpenAIProvider(AbstractProvider):
-    def _get_clean_url(self, endpoint="/chat/completions"):
-        """Бронебойная сборка URL, защищающая от двойных слешей и дублирования эндпоинтов"""
+    def generate(self, prompt: str, system_prompt: str = "", model: str = "gpt-4o") -> str:
         if not self.base_url:
             self.base_url = "https://api.openai.com/v1"
-        
-        base = self.base_url.rstrip('/')
-        if base.endswith(endpoint):
-            return base
-        return f"{base}{endpoint}"
-
-    def generate(self, prompt: str, system_prompt: str = "", model: str = "gpt-4o", image_paths: list = None) -> str:
-        url = self._get_clean_url("/chat/completions")
+            
+        url = f"{self.base_url.rstrip('/')}/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
-        
-        # Если это OpenRouter, добавляем их спец-заголовки
-        if "openrouter" in url:
-            headers["HTTP-Referer"] = "https://github.com/VibeCoder"
-            headers["X-Title"] = "VibeCoder IDE"
-        
-        user_content = []
-        if image_paths:
-            user_content.append({"type": "text", "text": prompt})
-            for path in image_paths:
-                base64_img = encode_image(path)
-                mime_type, _ = mimetypes.guess_type(path)
-                if not mime_type: mime_type = "image/jpeg"
-                user_content.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{mime_type};base64,{base64_img}"}
-                })
-        else:
-            user_content = prompt
-
         data = {
             "model": model or "gpt-4o",
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content}
+                {"role": "user", "content": prompt}
             ],
             "temperature": 0.2
         }
         
         response = requests.post(url, headers=headers, json=data, timeout=120)
-        
-        # Улучшенный перехват ошибок для понятного вывода в консоль
-        if response.status_code != 200:
-            try:
-                error_msg = response.json().get("error", {}).get("message", response.text)
-                raise Exception(f"API Error ({response.status_code}): {error_msg}")
-            except Exception as e:
-                if "API Error" in str(e): raise e
-                raise Exception(f"API Error: {response.status_code} - {response.text}")
-                
+        response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"]
 
     def get_models(self) -> list:
-        url = self._get_clean_url("/models")
+        if not self.base_url:
+            self.base_url = "https://api.openai.com/v1"
+        url = f"{self.base_url.rstrip('/')}/models"
         headers = {"Authorization": f"Bearer {self.api_key}"}
+        
         response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
+        
         data = response.json()
         models = [m["id"] for m in data.get("data", [])]
         return sorted(models, reverse=True)
 
     def verify_model(self, model: str) -> tuple[bool, str]:
-        url = self._get_clean_url("/chat/completions")
+        if not self.base_url:
+            self.base_url = "https://api.openai.com/v1"
+        url = f"{self.base_url.rstrip('/')}/chat/completions"
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        
+        # Попытка 1: С классическим ограничением (спасает от ошибки баланса в OpenRouter)
         data = {
             "model": model or "gpt-4o",
             "messages": [{"role": "user", "content": "ping"}],
             "max_tokens": 15
         }
+        
         try:
             res = requests.post(url, headers=headers, json=data, timeout=15)
             res.raise_for_status()
@@ -111,70 +80,69 @@ class OpenAIProvider(AbstractProvider):
                 try:
                     error_data = e.response.json().get("error", {})
                     err_msg = error_data.get("message", err_msg)
+                    
+                    # Попытка 2: Если это o1-подобная модель, требующая max_completion_tokens
                     if "max_tokens" in err_msg and "max_completion_tokens" in err_msg:
                         data.pop("max_tokens")
                         data["max_completion_tokens"] = 15
+                        
                         res2 = requests.post(url, headers=headers, json=data, timeout=15)
                         res2.raise_for_status()
                         return True, "Доступ подтвержден! (Использован max_completion_tokens)"
-                except Exception: pass
+                        
+                except Exception:
+                    pass
             return False, f"Ошибка доступа: {err_msg}"
 
 class AnthropicProvider(AbstractProvider):
-    def generate(self, prompt: str, system_prompt: str = "", model: str = "claude-3-5-sonnet-20241022", image_paths: list = None) -> str:
-        if not self.base_url: self.base_url = "https://api.anthropic.com"
-        url = f"{self.base_url.rstrip('/')}/v1/messages"
-        headers = {"x-api-key": self.api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"}
-        
-        user_content = []
-        if image_paths:
-            for path in image_paths:
-                base64_img = encode_image(path)
-                mime_type, _ = mimetypes.guess_type(path)
-                if not mime_type: mime_type = "image/jpeg"
-                user_content.append({
-                    "type": "image",
-                    "source": {"type": "base64", "media_type": mime_type, "data": base64_img}
-                })
-            user_content.append({"type": "text", "text": prompt})
-        else:
-            user_content = prompt
+    def generate(self, prompt: str, system_prompt: str = "", model: str = "claude-3-5-sonnet-20241022") -> str:
+        if not self.base_url:
+            self.base_url = "https://api.anthropic.com"
             
+        url = f"{self.base_url.rstrip('/')}/v1/messages"
+        headers = {
+            "x-api-key": self.api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json"
+        }
         data = {
             "model": model or "claude-3-5-sonnet-20241022",
             "max_tokens": 8192,
             "system": system_prompt,
-            "messages": [{"role": "user", "content": user_content}],
+            "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.2
         }
         
         response = requests.post(url, headers=headers, json=data, timeout=120)
-        
-        if response.status_code != 200:
-            try:
-                error_msg = response.json().get("error", {}).get("message", response.text)
-                raise Exception(f"API Error ({response.status_code}): {error_msg}")
-            except Exception as e:
-                if "API Error" in str(e): raise e
-                raise Exception(f"API Error: {response.status_code} - {response.text}")
-                
+        response.raise_for_status()
         return response.json()["content"][0]["text"]
 
     def get_models(self) -> list:
-        if not self.base_url: self.base_url = "https://api.anthropic.com"
+        if not self.base_url:
+            self.base_url = "https://api.anthropic.com"
         url = f"{self.base_url.rstrip('/')}/v1/models"
-        headers = {"x-api-key": self.api_key, "anthropic-version": "2023-06-01"}
+        headers = {
+            "x-api-key": self.api_key,
+            "anthropic-version": "2023-06-01"
+        }
+        
         response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
+        
         data = response.json()
         models = [m["id"] for m in data.get("data", []) if m["type"] == "model"]
         return sorted(models, reverse=True)
 
     def verify_model(self, model: str) -> tuple[bool, str]:
-        if not self.base_url: self.base_url = "https://api.anthropic.com"
+        if not self.base_url:
+            self.base_url = "https://api.anthropic.com"
         url = f"{self.base_url.rstrip('/')}/v1/messages"
         headers = {"x-api-key": self.api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"}
-        data = {"model": model or "claude-3-5-sonnet-20241022", "max_tokens": 15, "messages": [{"role": "user", "content": "ping"}]}
+        data = {
+            "model": model or "claude-3-5-sonnet-20241022",
+            "max_tokens": 15,
+            "messages": [{"role": "user", "content": "ping"}]
+        }
         try:
             res = requests.post(url, headers=headers, json=data, timeout=15)
             res.raise_for_status()
@@ -182,48 +150,28 @@ class AnthropicProvider(AbstractProvider):
         except requests.exceptions.RequestException as e:
             err_msg = str(e)
             if hasattr(e, 'response') and e.response is not None:
-                try: err_msg = e.response.json().get("error", {}).get("message", err_msg)
-                except ValueError: pass
+                try:
+                    err_msg = e.response.json().get("error", {}).get("message", err_msg)
+                except ValueError:
+                    pass
             return False, f"Ошибка доступа: {err_msg}"
 
 class GeminiAPIProvider(AbstractProvider):
-    def generate(self, prompt: str, system_prompt: str = "", model: str = "gemini-1.5-pro", image_paths: list = None) -> str:
+    def generate(self, prompt: str, system_prompt: str = "", model: str = "gemini-1.5-pro") -> str:
         used_model = model or "gemini-1.5-pro"
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{used_model}:generateContent?key={self.api_key}"
         headers = {"Content-Type": "application/json"}
         
-        parts = []
-        if system_prompt:
-            parts.append({"text": system_prompt + "\n\n"})
-        parts.append({"text": prompt})
+        full_text = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
         
-        if image_paths:
-            for path in image_paths:
-                base64_img = encode_image(path)
-                mime_type, _ = mimetypes.guess_type(path)
-                if not mime_type: mime_type = "image/jpeg"
-                parts.append({
-                    "inlineData": {
-                        "mimeType": mime_type,
-                        "data": base64_img
-                    }
-                })
-                
         data = {
-            "contents": [{"parts": parts}],
+            "contents": [{"parts": [{"text": full_text}]}],
             "generationConfig": {"temperature": 0.2}
         }
         
         response = requests.post(url, headers=headers, json=data, timeout=120)
+        response.raise_for_status()
         
-        if response.status_code != 200:
-            try:
-                error_msg = response.json().get("error", {}).get("message", response.text)
-                raise Exception(f"API Error ({response.status_code}): {error_msg}")
-            except Exception as e:
-                if "API Error" in str(e): raise e
-                raise Exception(f"API Error: {response.status_code} - {response.text}")
-                
         resp_json = response.json()
         try:
             return resp_json["candidates"][0]["content"]["parts"][0]["text"]
@@ -234,6 +182,7 @@ class GeminiAPIProvider(AbstractProvider):
         url = f"https://generativelanguage.googleapis.com/v1beta/models?key={self.api_key}"
         response = requests.get(url, timeout=15)
         response.raise_for_status()
+        
         data = response.json()
         models = []
         for m in data.get("models", []):
@@ -245,7 +194,9 @@ class GeminiAPIProvider(AbstractProvider):
     def verify_model(self, model: str) -> tuple[bool, str]:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={self.api_key}"
         headers = {"Content-Type": "application/json"}
-        data = {"contents": [{"parts": [{"text": "ping"}]}]}
+        data = {
+            "contents": [{"parts": [{"text": "ping"}]}],
+        }
         try:
             res = requests.post(url, headers=headers, json=data, timeout=15)
             res.raise_for_status()
@@ -253,6 +204,8 @@ class GeminiAPIProvider(AbstractProvider):
         except requests.exceptions.RequestException as e:
             err_msg = str(e)
             if hasattr(e, 'response') and e.response is not None:
-                try: err_msg = e.response.json().get("error", {}).get("message", err_msg)
-                except ValueError: pass
+                try:
+                    err_msg = e.response.json().get("error", {}).get("message", err_msg)
+                except ValueError:
+                    pass
             return False, f"Ошибка доступа: {err_msg}"

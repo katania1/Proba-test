@@ -3,7 +3,7 @@ import json
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QSplitter, 
                              QVBoxLayout, QPushButton, QMessageBox, QDialog, 
                              QStatusBar, QTabWidget, QTextBrowser, QComboBox, QLabel,
-                             QAbstractItemView, QFileDialog)
+                             QAbstractItemView)
 from PyQt6.QtCore import Qt, QDir, QUrl, QSettings, QEvent, QTimer
 from PyQt6.QtGui import QShortcut, QKeySequence, QStandardItemModel, QStandardItem
 
@@ -15,7 +15,7 @@ from core.file_ops import FileManager
 from core.chat_logger import ChatLogger
 from core.history_viewer import HistoryDialog
 
-from core.custom_widgets import TagHighlighter, VibeTextEdit, VibeChatBrowser, AttachmentPanel
+from core.custom_widgets import TagHighlighter, VibeTextEdit, VibeChatBrowser
 from core.file_explorer import FileExplorerWidget
 from core.time_machine import TimeMachineDialog
 from core.git_manager import GitManager
@@ -28,7 +28,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("VibeCoder v1.19 — Terminal & Multi-Engine Edition")
         
         self.settings = QSettings("VibeCoder", "Preferences")
-        self.api_settings = QSettings("VibeCoder", "API_Config")
+        self.api_settings = QSettings("VibeCoder", "API_Config") # Настройки для API
         
         self.attached_files = set()
         self.last_full_prompt = ""
@@ -69,7 +69,7 @@ class MainWindow(QMainWindow):
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         
-        # --- СЕЛЕКТОР ДВИЖКА ---
+        # --- СЕЛЕКТОР ДВИЖКА (УМНЫЙ COMBOBOX) ---
         status_container = QWidget()
         status_layout = QHBoxLayout(status_container)
         status_layout.setContentsMargins(5, 0, 10, 0)
@@ -94,7 +94,8 @@ class MainWindow(QMainWindow):
         self.refresh_engine_list()
         self.combo_engine.currentTextChanged.connect(self._save_engine_selection)
         
-        # --- СЕЛЕКТОР БРАУЗЕРА ---
+        # ----------------------------------------
+        
         lbl_browser = QLabel("Браузер: ")
         lbl_browser.setStyleSheet("color: #d4d4d4; font-weight: bold; margin-left: 10px;")
         
@@ -155,6 +156,7 @@ class MainWindow(QMainWindow):
         self.prompt_input = VibeTextEdit()
         self.prompt_input.setPlaceholderText("Напишите задание...\n(Отправка: Ctrl+Enter, Перенос: Enter, Зум: Ctrl+Колесо мыши)")
         self.prompt_input.tag_action_signal.connect(self.handle_tag_action)
+        
         self.prompt_input.project_path = self.project_path
         self.prompt_input.highlighter = TagHighlighter(self.prompt_input.document(), self.attached_files)
         
@@ -162,12 +164,7 @@ class MainWindow(QMainWindow):
         self.prompt_input.set_custom_font_size(input_font)
         self.prompt_input.zoom_changed.connect(lambda size: self.settings.setValue("input_font_size", size))
         
-        self.attachment_panel = AttachmentPanel()
-        self.prompt_input.media_attached_signal.connect(self.attachment_panel.add_attachment)
-        
         input_layout.addWidget(self.prompt_input)
-        input_layout.addWidget(self.attachment_panel) # Панель картинок теперь под полем ввода
-        
         chat_splitter.addWidget(input_container)
         chat_splitter.setSizes([600, 200])
         chat_layout.addWidget(chat_splitter)
@@ -197,12 +194,6 @@ class MainWindow(QMainWindow):
         
         bottom_btn_layout = QHBoxLayout()
         bottom_btn_layout.setSpacing(5)
-        
-        self.btn_attach = QPushButton("📎")
-        self.btn_attach.setToolTip("Прикрепить медиа-файл (картинку)")
-        self.btn_attach.setFixedHeight(35)
-        self.btn_attach.setStyleSheet("background-color: #333333; color: white; font-size: 16px; border-radius: 4px;")
-        self.btn_attach.clicked.connect(self.open_attachment_dialog)
         
         self.btn_send = QPushButton("➤ Отправить")
         self.btn_send.setFixedHeight(35)
@@ -247,7 +238,6 @@ class MainWindow(QMainWindow):
         self.btn_approve.setFixedHeight(35)
         self.btn_approve.setStyleSheet("background-color: #2e7d32; color: white; font-weight: bold; border-radius: 4px;") 
         
-        bottom_btn_layout.addWidget(self.btn_attach, 1)
         bottom_btn_layout.addWidget(self.btn_send, 2)
         bottom_btn_layout.addWidget(self.btn_pause, 2)
         bottom_btn_layout.addWidget(self.btn_history, 1)
@@ -300,10 +290,12 @@ class MainWindow(QMainWindow):
 
     def _add_engine_item(self, text, provider_id, icon=""):
         item = QStandardItem(f"  {icon} {text}" if icon else f"  {text}")
+        # Скрыто сохраняем ID провайдера и чистую модель для AIController
         item.setData({"provider_id": provider_id, "model": text}, Qt.ItemDataRole.UserRole)
         self.engine_model.appendRow(item)
 
     def get_selected_engine_data(self):
+        """Возвращает скрытые данные текущего выбранного движка"""
         index = self.combo_engine.currentIndex()
         if index >= 0:
             item = self.engine_model.item(index)
@@ -316,9 +308,11 @@ class MainWindow(QMainWindow):
         self.combo_engine.blockSignals(True)
         self.engine_model.clear()
         
+        # 1. Браузер
         self._add_engine_category("--- БРАУЗЕР (ВКЛАДКИ) ---")
         self._add_engine_item("Gemini Web", "Browser", icon="🌐")
         
+        # 2. Базовые API
         oai_models = self.api_settings.value("OpenAI_verified", [])
         if isinstance(oai_models, str): oai_models = [oai_models]
         if oai_models:
@@ -337,6 +331,7 @@ class MainWindow(QMainWindow):
             self._add_engine_category("--- GEMINI API ---")
             for m in gem_models: self._add_engine_item(m, "Gemini", icon="🤖")
 
+        # 3. Кастомные провайдеры (Groq, OpenRouter, и т.д.)
         custom_data = self.api_settings.value("custom_providers", "[]")
         try:
             custom_providers = json.loads(custom_data)
@@ -354,6 +349,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"Ошибка парсинга кастомных провайдеров: {e}")
 
+        # Восстанавливаем последний выбор
         last_selection = self.settings.value("last_engine", "  🌐 Gemini Web")
         index = self.combo_engine.findText(last_selection)
         if index >= 0:
@@ -370,18 +366,7 @@ class MainWindow(QMainWindow):
         dialog = APISettingsDialog(self)
         if dialog.exec():
             self.refresh_engine_list()
-
-    def open_attachment_dialog(self):
-        """Открывает диалог выбора картинок и добавляет их в панель"""
-        files, _ = QFileDialog.getOpenFileNames(
-            self, 
-            "Выберите картинки", 
-            self.project_path, 
-            "Images (*.png *.jpg *.jpeg *.webp *.gif *.bmp)"
-        )
-        if files:
-            for f in files:
-                self.attachment_panel.add_attachment(os.path.normpath(f))
+    # --------------------------------
 
     def toggle_terminal(self):
         if self.btn_terminal.isChecked():

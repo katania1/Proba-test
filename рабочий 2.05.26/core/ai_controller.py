@@ -51,19 +51,6 @@ class AIController(QObject):
             self.mw.show_popup("Ошибка связи", "Нет активных вкладок браузера!\nОткройте Gemini и обновите страницу.", is_error=True)
             return
 
-        # ЗАБИРАЕМ КАРТИНКИ ИЗ ПАНЕЛИ
-        image_paths = list(self.mw.attachment_panel.get_attachments())
-
-        # Если выбран браузер и есть картинки — предупреждаем
-        if provider_id == "Browser" and image_paths:
-            self.mw.show_popup(
-                "Ограничение браузера", 
-                "Отправка картинок напрямую в браузерную вкладку пока не поддерживается.\n\n"
-                "Пожалуйста, используйте API (переключите движок) или прикрепите картинку вручную на сайте Gemini.", 
-                is_error=True
-            )
-            return
-
         attached_blocks = []
         tags_in_text = re.findall(r'@\[.*?\]|@[\w\.\-\/\\]+', user_text)
         for tag in tags_in_text:
@@ -71,6 +58,7 @@ class AIController(QObject):
             if fname in self.mw.attached_files:
                 content = self.mw.get_file_content_safe(fname)
                 if content: 
+                    # Используем безопасную конкатенацию вместо f-строк с переносами
                     attached_blocks.append("### ФАЙЛ: " + fname + " ###\n```\n" + content + "\n```")
         
         final_prompt_text = user_text + ("\n\n[СИСТЕМНЫЙ БЛОК: ПРИКРЕПЛЕННЫЙ КОД]\n" + "\n\n".join(attached_blocks) + "\n[КОНЕЦ СИСТЕМНОГО БЛОКА]" if attached_blocks else "")
@@ -82,8 +70,7 @@ class AIController(QObject):
         else:
             tab_display_name = selected_model
             
-        media_notice = f" <i>(+ {len(image_paths)} картинки)</i>" if image_paths else ""
-        self.mw.chat_history.append(f"<br><span style='color: #569cd6;'><b>ВЫ</b> (в <i>{tab_display_name}</i>){media_notice}<b>:</b> {user_text}</span>")
+        self.mw.chat_history.append(f"<br><span style='color: #569cd6;'><b>ВЫ</b> (в <i>{tab_display_name}</i>)<b>:</b> {user_text}</span>")
         self.mw.chat_history.append(f"<a href='view_prompt:last' style='color: #65676b; font-size: 10px;'>[Показать сырой промпт]</a>")
             
         self.mw.last_full_prompt = self.orchestrator.format_request(
@@ -96,17 +83,15 @@ class AIController(QObject):
         self.mw.tokens_sent += self.estimate_tokens(self.mw.last_full_prompt)
         self.mw.update_status_bar()
         self.retry_count = 0 
-        
         self.mw.prompt_input.clear()
-        self.mw.attachment_panel.clear() # Очищаем панель картинок после отправки
         
         if provider_id == "Browser":
             self.bridge.add_task(self.mw.last_full_prompt, is_relay=False, target_id=target_id)
             self.mw.log_system(f"Задача отправлена во вкладку '{tab_display_name}'. Ожидание ответа...")
         else:
-            self.execute_api_task(provider_id, selected_model, image_paths)
+            self.execute_api_task(provider_id, selected_model)
 
-    def execute_api_task(self, provider_id, selected_model, image_paths=None):
+    def execute_api_task(self, provider_id, selected_model):
         settings = QSettings("VibeCoder", "API_Config")
         provider = None
         
@@ -140,12 +125,9 @@ class AIController(QObject):
                 provider = OpenAIProvider(key, url)
 
             if provider:
-                media_log = f" и {len(image_paths)} картинками" if image_paths else ""
-                self.mw.log_system(f"Отправка запроса{media_log} через API (Модель: {selected_model})...")
-                
-                # Магия лямбды: подменяем метод, чтобы прокинуть картинки в фоновый поток без изменения APIWorker
+                self.mw.log_system(f"Отправка запроса через API (Модель: {selected_model})...")
                 original_generate = provider.generate
-                provider.generate = lambda p, sp: original_generate(p, sp, model=selected_model, image_paths=image_paths)
+                provider.generate = lambda p, sp: original_generate(p, sp, model=selected_model)
                 
                 self.worker = APIWorker(provider, self.mw.last_full_prompt, self.orchestrator.system_prompt)
                 self.worker.finished_signal.connect(self.process_ai_response)

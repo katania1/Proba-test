@@ -1,0 +1,23 @@
+# VibeCoder
+.vibecoder/
+.vibe_backups/
+__pycache__/
+*.pyc
+# Python Virtual Environment
+venv/
+env/
+.env
+
+proba3.py
+
+рабочий 30.04.26/
+
+рабочий 28.04.26/
+
+рабочий 1.05.26/
+
+proba
+
+proba1.py
+__pycache__/
+*.pyc
