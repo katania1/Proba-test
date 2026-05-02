@@ -1,14 +1,9 @@
 import os
-import json
-from datetime import datetime
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QSplitter, 
-                             QVBoxLayout, QPushButton, QMessageBox, QDialog, 
-                             QStatusBar, QTabWidget, QTextBrowser, QComboBox, QLabel,
-                             QAbstractItemView, QFileDialog, QScrollArea,
-                             QProgressBar, QTableWidget, QTableWidgetItem, QHeaderView,
-                             QCheckBox, QSizePolicy) # Добавлен QCheckBox и QSizePolicy!
-from PyQt6.QtCore import Qt, QDir, QUrl, QSettings, QEvent, QTimer
-from PyQt6.QtGui import QShortcut, QKeySequence, QStandardItemModel, QStandardItem
+                             QVBoxLayout, QDialog, QTabWidget, QTextBrowser, 
+                             QLabel, QFileDialog, QPushButton, QMessageBox)
+from PyQt6.QtCore import Qt, QDir, QUrl, QSettings, QEvent
+from PyQt6.QtGui import QShortcut, QKeySequence
 
 # Импорты ядра
 from core.editor import DarkPythonEditor
@@ -26,16 +21,17 @@ from core.time_machine import TimeMachineDialog
 from core.git_manager import GitManager
 from core.api_settings_dialog import APISettingsDialog
 from core.terminal import TerminalWidget
-from core.indexer_worker import IndexerWorker
-from core.rag_dialog import RAGAnalyticsDialog
 
-
+# НОВЫЕ ИМПОРТЫ НАШЕЙ ОПТИМИЗАЦИИ
+from core.rag_controller import RagController
+from core.status_bar import VibeStatusBar
+from core.bottom_panel import BottomPanelWidget
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("VibeCoder v1.19 — Terminal, Multi-Engine & RAG Edition")
+        self.setWindowTitle("VibeCoder v1.19 — Pro IDE Edition")
         
         self.settings = QSettings("VibeCoder", "Preferences")
         self.api_settings = QSettings("VibeCoder", "API_Config")
@@ -76,52 +72,9 @@ class MainWindow(QMainWindow):
         if not os.path.exists(self.project_path):
             self.project_path = QDir.currentPath()
         
-        self.status_bar = QStatusBar()
+        # --- СТАТУС-БАР ---
+        self.status_bar = VibeStatusBar(self)
         self.setStatusBar(self.status_bar)
-        
-        # --- СЕЛЕКТОР ДВИЖКА ---
-        status_container = QWidget()
-        status_layout = QHBoxLayout(status_container)
-        status_layout.setContentsMargins(5, 0, 10, 0)
-        
-        lbl_engine = QLabel("Движок: ")
-        lbl_engine.setStyleSheet("color: #d4d4d4; font-weight: bold; margin-left: 10px;")
-        
-        self.combo_engine = QComboBox()
-        self.combo_engine.setStyleSheet("""
-            QComboBox { background-color: #252526; color: white; border: 1px solid #3c3c3c; padding: 2px 10px; border-radius: 3px; font-weight: bold; }
-            QComboBox::drop-down { border: none; }
-            QComboBox QAbstractItemView { background-color: #1e1e1e; color: #d4d4d4; selection-background-color: #0e639c; selection-color: white; border: 1px solid #3c3c3c; }
-        """)
-        self.combo_engine.setMinimumWidth(220)
-        
-        self.engine_model = QStandardItemModel()
-        self.combo_engine.setModel(self.engine_model)
-        
-        status_layout.addWidget(lbl_engine)
-        status_layout.addWidget(self.combo_engine)
-        
-        self.refresh_engine_list()
-        self.combo_engine.currentTextChanged.connect(self._save_engine_selection)
-        
-        # --- СЕЛЕКТОР БРАУЗЕРА ---
-        lbl_browser = QLabel("Браузер: ")
-        lbl_browser.setStyleSheet("color: #d4d4d4; font-weight: bold; margin-left: 10px;")
-        
-        self.combo_tabs = QComboBox()
-        self.combo_tabs.setStyleSheet(self.combo_engine.styleSheet())
-        self.combo_tabs.setMinimumWidth(120)
-        
-        status_layout.addWidget(lbl_browser)
-        status_layout.addWidget(self.combo_tabs)
-        self.status_bar.addPermanentWidget(status_container)
-        
-        self.locked_tab_id = None
-        self.combo_tabs.currentIndexChanged.connect(self.on_tab_manually_changed)
-        
-        self.tab_timer = QTimer(self)
-        self.tab_timer.timeout.connect(self.update_tabs_ui)
-        self.tab_timer.start(2000)
         
         self.tokens_sent = 0
         self.tokens_received = 0
@@ -152,7 +105,6 @@ class MainWindow(QMainWindow):
         self.chat_history.setOpenLinks(False)
         self.chat_history.anchorClicked.connect(self.handle_chat_link)
         self.chat_history.setPlaceholderText("Логи системы и ответы ИИ...")
-        
         self.chat_history.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.chat_history.customContextMenuRequested.connect(self.show_chat_context_menu)
         
@@ -162,12 +114,16 @@ class MainWindow(QMainWindow):
         
         chat_splitter.addWidget(self.chat_history)
 
+        # --- ОБНОВЛЕННЫЙ БЛОК ВВОДА С КНОПКАМИ ---
         input_container = QWidget()
+        input_container.setStyleSheet("background-color: #252526; border: 1px solid #3c3c3c; border-radius: 4px;")
         input_layout = QVBoxLayout(input_container)
-        input_layout.setContentsMargins(0, 5, 0, 0)
+        input_layout.setContentsMargins(2, 2, 2, 2)
+        input_layout.setSpacing(2)
         
         self.prompt_input = VibeTextEdit()
-        self.prompt_input.setPlaceholderText("Напишите задание...\n(Отправка: Ctrl+Enter, Перенос: Enter, Зум: Ctrl+Колесо мыши)")
+        self.prompt_input.setPlaceholderText("Напишите задание (Отправка: Ctrl+Enter)...")
+        self.prompt_input.setStyleSheet("background-color: transparent; border: none; color: #d4d4d4;")
         self.prompt_input.tag_action_signal.connect(self.handle_tag_action)
         self.prompt_input.project_path = self.project_path
         self.prompt_input.highlighter = TagHighlighter(self.prompt_input.document(), self.attached_files)
@@ -181,6 +137,41 @@ class MainWindow(QMainWindow):
         
         input_layout.addWidget(self.prompt_input)
         input_layout.addWidget(self.attachment_panel) 
+
+        # -- БЛОК КНОПОК ДЕЙСТВИЙ (ЦЕЛЕВЫЕ КНОПКИ ВНИЗУ ПОЛЯ ВВОДА) --
+        action_layout = QHBoxLayout()
+        action_layout.setContentsMargins(5, 0, 5, 5)
+        
+        # ДОБАВЛЯЕМ ПРУЖИНУ СЛЕВА! Теперь кнопки прилипнут к правому краю
+        action_layout.addStretch() 
+        
+        btn_action_style = "color: white; font-weight: bold; border-radius: 3px; padding: 2px 10px; font-size: 11px; margin-left: 5px;"
+
+        self.btn_send = QPushButton("➤ Отправить")
+        self.btn_send.setFixedHeight(24)
+        self.btn_send.setStyleSheet(f"background-color: #b58900; color: #1e1e1e; {btn_action_style.replace('color: white;', '')}")
+        
+        self.btn_pause = QPushButton("■ Пауза")
+        self.btn_pause.setCheckable(True)
+        self.btn_pause.setFixedHeight(24)
+        self.btn_pause.setStyleSheet(f"background-color: #d32f2f; {btn_action_style}")
+        
+        self.btn_approve = QPushButton("✅ Утвердить код")
+        self.btn_approve.setFixedHeight(24)
+        self.btn_approve.setStyleSheet(f"background-color: #2e7d32; {btn_action_style}")
+        
+        self.btn_reject_main = QPushButton("❌ Отклонить")
+        self.btn_reject_main.setFixedHeight(24)
+        self.btn_reject_main.setStyleSheet(f"background-color: #512525; {btn_action_style}")
+        self.btn_reject_main.setVisible(False)
+        
+        action_layout.addWidget(self.btn_send)
+        action_layout.addWidget(self.btn_pause)
+        action_layout.addWidget(self.btn_approve)
+        action_layout.addWidget(self.btn_reject_main)
+
+        input_layout.addLayout(action_layout)
+        # ----------------------------------------------------
         
         chat_splitter.addWidget(input_container)
         chat_splitter.setSizes([600, 200])
@@ -210,117 +201,25 @@ class MainWindow(QMainWindow):
         self.editor_splitter.setSizes([700, 300]) 
         editor_layout.addWidget(self.editor_splitter)
         
-        # --- ПАНЕЛЬ КНОПОК (НОВАЯ КОМПОНОВКА) ---
-        bottom_toolbar = QWidget()
-        bottom_toolbar.setObjectName("BottomToolbar") # Для CSS
-        bottom_btn_layout = QHBoxLayout(bottom_toolbar)
-        bottom_btn_layout.setContentsMargins(0, 5, 0, 0)
-        bottom_btn_layout.setSpacing(5)
-        
-        # Левый блок кнопок
-        self.btn_attach = QPushButton("📎")
-        self.btn_attach.setToolTip("Прикрепить медиа-файл (картинку)")
-        self.btn_attach.setFixedHeight(35)
-        self.btn_attach.setStyleSheet("background-color: #333333; color: white; font-size: 16px; border-radius: 4px; padding: 0 10px;")
-        self.btn_attach.clicked.connect(self.open_attachment_dialog)
-        
-        self.btn_send = QPushButton("➤ Отправить")
-        self.btn_send.setToolTip("Отправить запрос ИИ (Ctrl+Enter)")
-        self.btn_send.setFixedHeight(35)
-        self.btn_send.setStyleSheet("background-color: #b58900; color: #1e1e1e; font-weight: bold; border-radius: 4px; padding: 0 15px;")
-        
-        self.btn_pause = QPushButton("■ Пауза")
-        self.btn_pause.setToolTip("Приостановить работу")
-        self.btn_pause.setCheckable(True)
-        self.btn_pause.setFixedHeight(35)
-        self.btn_pause.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold; border-radius: 4px; padding: 0 15px;")
-        self.btn_pause.clicked.connect(self.toggle_pause)
+        # --- ВОЗВРАЩАЕМ ПАНЕЛЬ ПОД РЕДАКТОР ---
+        self.bottom_panel = BottomPanelWidget()
+        editor_layout.addWidget(self.bottom_panel)
 
-        self.btn_approve = QPushButton("✅ Утвердить код")
-        self.btn_approve.setToolTip("Открыть ревью предложенного кода")
-        self.btn_approve.setFixedHeight(35)
-        self.btn_approve.setStyleSheet("background-color: #2e7d32; color: white; font-weight: bold; border-radius: 4px; padding: 0 15px;") 
-
-        self.btn_reject_main = QPushButton("❌ Отклонить")
-        self.btn_reject_main.setFixedHeight(35)
-        self.btn_reject_main.setStyleSheet("background-color: #512525; color: white; font-weight: bold; border-radius: 4px; padding: 0 15px;")
-        self.btn_reject_main.setVisible(False)
-
-        # Добавляем левый блок
-        bottom_btn_layout.addWidget(self.btn_attach)
-        bottom_btn_layout.addWidget(self.btn_send)
-        bottom_btn_layout.addWidget(self.btn_pause)
-        bottom_btn_layout.addWidget(self.btn_approve)
-        bottom_btn_layout.addWidget(self.btn_reject_main)
-        
-        # ПРУЖИНА (сдвигает оставшиеся кнопки вправо)
-        bottom_btn_layout.addStretch()
-        
-        # Правый блок кнопок
-        self.btn_history = QPushButton("📜")
-        self.btn_history.setToolTip("Умная история проекта и сессий")
-        self.btn_history.setFixedHeight(35)
-        self.btn_history.setStyleSheet("background-color: #333333; color: white; font-size: 16px; border-radius: 4px; padding: 0 10px;")
-        self.btn_history.clicked.connect(self.show_history)
-        
-        self.btn_relay = QPushButton("🔄")
-        self.btn_relay.setToolTip("Сформировать транзитный пакет (эстафету)")
-        self.btn_relay.setFixedHeight(35)
-        self.btn_relay.setStyleSheet("background-color: #005f73; color: white; font-size: 16px; border-radius: 4px; padding: 0 10px;")
-        
-        self.btn_api = QPushButton("⚙️ API")
-        self.btn_api.setToolTip("Настройки API провайдеров")
-        self.btn_api.setFixedHeight(35)
-        self.btn_api.setStyleSheet("background-color: #333333; color: white; font-weight: bold; border-radius: 4px; padding: 0 10px;")
-        self.btn_api.clicked.connect(self.open_api_settings)
-
-        # Маленькая иконка терминала
-        self.btn_terminal = QPushButton("💻")
-        self.btn_terminal.setToolTip("Открыть встроенный терминал (Ctrl+`)")
-        self.btn_terminal.setCheckable(True)
-        self.btn_terminal.setFixedSize(35, 35) # Квадратная жесткая кнопка
-        self.btn_terminal.setStyleSheet("background-color: #333333; color: white; font-size: 16px; font-weight: bold; border-radius: 4px;")
-        self.btn_terminal.clicked.connect(self.toggle_terminal)
-        
-        self.btn_git = QPushButton("📦 Git")
-        self.btn_git.setToolTip("Управление Git и GitHub")
-        self.btn_git.setFixedHeight(35)
-        self.btn_git.setStyleSheet("background-color: #4a148c; color: white; font-weight: bold; border-radius: 4px; padding: 0 15px;")
-
-        self.btn_rag = QPushButton("🧠 RAG (Индекс)")
-        self.btn_rag.setToolTip("Запустить семантическую индексацию проекта. ПКМ — Аналитика и автообновление.")
-        self.btn_rag.setFixedHeight(35)
-        self.btn_rag.setStyleSheet("background-color: #00838f; color: white; font-weight: bold; border-radius: 4px; padding: 0 15px;")
-        self.btn_rag.clicked.connect(self.start_rag_indexing)
-        self.btn_rag.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.btn_rag.customContextMenuRequested.connect(self.show_rag_analytics)
-
-        # Добавляем правый блок
-        bottom_btn_layout.addWidget(self.btn_history)
-        bottom_btn_layout.addWidget(self.btn_relay)
-        bottom_btn_layout.addWidget(self.btn_api)
-        bottom_btn_layout.addWidget(self.btn_terminal)
-        bottom_btn_layout.addWidget(self.btn_git)
-        bottom_btn_layout.addWidget(self.btn_rag)
-        
-        # Оборачиваем в ScrollArea для защиты от блокировки сжатия окна
-        toolbar_scroll = QScrollArea()
-        toolbar_scroll.setWidget(bottom_toolbar)
-        toolbar_scroll.setWidgetResizable(True)
-        toolbar_scroll.setFixedHeight(45)
-        toolbar_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        toolbar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        toolbar_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        # Делаем ScrollArea АБСОЛЮТНО прозрачным, чтобы не было белого фона
-        toolbar_scroll.setStyleSheet("""
-            QScrollArea { background-color: transparent; border: none; }
-            QWidget#BottomToolbar { background-color: transparent; }
-        """)
-        
-        editor_layout.addWidget(toolbar_scroll)
         self.splitter.addWidget(editor_widget)
         self.splitter.setSizes([220, 450, 630])
+
+        # --- СВЯЗЫВАНИЕ АЛИАСОВ ---
+        self.btn_attach = self.bottom_panel.btn_attach
+        self.btn_history = self.bottom_panel.btn_history
+        self.btn_relay = self.bottom_panel.btn_relay
+        self.btn_api = self.bottom_panel.btn_api
+        self.btn_git = self.bottom_panel.btn_git
+        self.btn_rag = self.bottom_panel.btn_rag
+        self.btn_terminal = self.status_bar.btn_terminal
         
+        # --- RAG КОНТРОЛЛЕР ---
+        self.rag_controller = RagController(self)
+
         self.current_file_path = None
         self.proposed_updates = [] 
         self.retry_count = 0        
@@ -339,6 +238,16 @@ class MainWindow(QMainWindow):
         self.btn_reject_main.clicked.connect(self.code_applier.reject_preview)
         self.btn_git.clicked.connect(self.git_workflow.open_git_dialog)
         
+        # --- ПОДКЛЮЧЕНИЕ СИГНАЛОВ КНОПОК ---
+        self.btn_attach.clicked.connect(self.open_attachment_dialog)
+        self.btn_pause.clicked.connect(self.toggle_pause)
+        self.btn_history.clicked.connect(self.show_history)
+        self.btn_api.clicked.connect(self.open_api_settings)
+        self.btn_terminal.clicked.connect(self.toggle_terminal)
+        self.btn_rag.clicked.connect(self.rag_controller.start_indexing)
+        self.btn_rag.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.btn_rag.customContextMenuRequested.connect(self.rag_controller.show_analytics)
+
         self.ai_controller = AIController(self)
         self.ai_controller.start()
         
@@ -349,127 +258,44 @@ class MainWindow(QMainWindow):
         self._check_project_environment()
         self._load_recent_chat_history()
 
-    # --- КОНТЕКСТНОЕ МЕНЮ ЧАТА ---
+
+    # ==========================================
+    # ПРОСТЫЕ МЕТОДЫ (ОСТАВЛЕНЫ В MAIN_WINDOW)
+    # ==========================================
+    def get_selected_engine_data(self):
+        return self.status_bar.get_selected_engine_data()
+        
+    def get_current_target_id(self):
+        return self.status_bar.get_current_target_id()
+
     def show_chat_context_menu(self, pos):
         menu = self.chat_history.createStandardContextMenu()
         menu.addSeparator()
         action_clear = menu.addAction("🗑️ Очистить окно чата")
         action = menu.exec(self.chat_history.viewport().mapToGlobal(pos))
-        
         if action == action_clear:
             self.chat_history.clear()
             self.log_system("Окно чата очищено (история сохранена в базе данных).")
 
-    # --- МЕТОДЫ СЕЛЕКТОРА ДВИЖКА ---
-    def _add_engine_category(self, title):
-        item = QStandardItem(title)
-        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable & ~Qt.ItemFlag.ItemIsEnabled)
-        item.setData(title, Qt.ItemDataRole.DisplayRole)
-        item.setForeground(Qt.GlobalColor.darkGray)
-        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.engine_model.appendRow(item)
-
-    def _add_engine_item(self, text, provider_id, icon=""):
-        item = QStandardItem(f"  {icon} {text}" if icon else f"  {text}")
-        item.setData({"provider_id": provider_id, "model": text}, Qt.ItemDataRole.UserRole)
-        self.engine_model.appendRow(item)
-
-    def get_selected_engine_data(self):
-        index = self.combo_engine.currentIndex()
-        if index >= 0:
-            item = self.engine_model.item(index)
-            if item:
-                data = item.data(Qt.ItemDataRole.UserRole)
-                if data: return data
-        return {"provider_id": "Browser", "model": "Gemini Web"}
-
-    def refresh_engine_list(self):
-        self.combo_engine.blockSignals(True)
-        self.engine_model.clear()
-        
-        self._add_engine_category("--- БРАУЗЕР (ВКЛАДКИ) ---")
-        self._add_engine_item("Gemini Web", "Browser", icon="🌐")
-        
-        oai_models = self.api_settings.value("OpenAI_verified", [])
-        if isinstance(oai_models, str): oai_models = [oai_models]
-        if oai_models:
-            self._add_engine_category("--- OPENAI API ---")
-            for m in oai_models: self._add_engine_item(m, "OpenAI", icon="🟢")
-                
-        ant_models = self.api_settings.value("Anthropic_verified", [])
-        if isinstance(ant_models, str): ant_models = [ant_models]
-        if ant_models:
-            self._add_engine_category("--- ANTHROPIC API ---")
-            for m in ant_models: self._add_engine_item(m, "Anthropic", icon="🟣")
-                
-        gem_models = self.api_settings.value("Gemini_verified", [])
-        if isinstance(gem_models, str): gem_models = [gem_models]
-        if gem_models:
-            self._add_engine_category("--- GEMINI API ---")
-            for m in gem_models: self._add_engine_item(m, "Gemini", icon="🤖")
-
-        custom_data = self.api_settings.value("custom_providers", "[]")
-        try:
-            custom_providers = json.loads(custom_data)
-            for p in custom_providers:
-                p_id = p['id']
-                p_name = p['name']
-                
-                c_models = self.api_settings.value(f"{p_id}_verified", [])
-                if isinstance(c_models, str): c_models = [c_models]
-                
-                if c_models:
-                    self._add_engine_category(f"--- {p_name.upper()} ---")
-                    for m in c_models:
-                        self._add_engine_item(m, p_id, icon="⚡")
-        except Exception:
-            pass
-
-        last_selection = self.settings.value("last_engine", "  🌐 Gemini Web")
-        index = self.combo_engine.findText(last_selection)
-        if index >= 0:
-            self.combo_engine.setCurrentIndex(index)
-        else:
-            self.combo_engine.setCurrentIndex(1) 
-            
-        self.combo_engine.blockSignals(False)
-
-    def _save_engine_selection(self, text):
-        self.settings.setValue("last_engine", text)
-
     def open_api_settings(self):
         dialog = APISettingsDialog(self)
         if dialog.exec():
-            self.refresh_engine_list()
+            self.status_bar.refresh_engine_list()
 
     def open_attachment_dialog(self):
+        from PyQt6.QtWidgets import QFileDialog
         files, _ = QFileDialog.getOpenFileNames(
-            self, 
-            "Выберите картинки", 
-            self.project_path, 
-            "Images (*.png *.jpg *.jpeg *.webp *.gif *.bmp)"
+            self, "Выберите картинки", self.project_path, "Images (*.png *.jpg *.jpeg *.webp *.gif *.bmp)"
         )
         if files:
-            for f in files:
-                self.attachment_panel.add_attachment(os.path.normpath(f))
+            for f in files: self.attachment_panel.add_attachment(os.path.normpath(f))
 
     def toggle_terminal(self):
         if self.btn_terminal.isChecked():
             self.terminal.setVisible(True)
-            self.btn_terminal.setStyleSheet("background-color: #0e639c; color: white; font-size: 16px; font-weight: bold; border-radius: 4px;")
             self.terminal.input_line.setFocus()
         else:
             self.terminal.setVisible(False)
-            self.btn_terminal.setStyleSheet("background-color: #333333; color: white; font-size: 16px; font-weight: bold; border-radius: 4px;")
-
-    def on_tab_manually_changed(self, index):
-        if index >= 0:
-            text = self.combo_tabs.itemText(index)
-            if "[" in text and "]" in text:
-                self.locked_tab_id = text.split("[")[-1].split("]")[0]
-
-    def get_current_target_id(self):
-        return self.locked_tab_id
 
     def is_path_safe(self, file_path):
         return self.code_applier.is_path_safe(file_path)
@@ -480,9 +306,6 @@ class MainWindow(QMainWindow):
     def update_git_status(self):
         self.git_workflow.update_git_status()
 
-    def open_git_dialog(self, prefill_msg=""):
-        self.git_workflow.open_git_dialog(prefill_msg)
-        
     def request_ai_commit_message(self, diff_text):
         self.ai_controller.request_ai_commit_message(diff_text)
 
@@ -497,90 +320,9 @@ class MainWindow(QMainWindow):
                 return True 
         return super().eventFilter(obj, event)
 
-    # ==========================================
-    # RAG ИНДЕКСАЦИЯ
-    # ==========================================
-    def show_rag_analytics(self, pos):
-        if not self.project_path or self.project_path == QDir.currentPath() or len(self.project_path) <= 3:
-            self.show_popup("Ошибка", "Сначала откройте или создайте рабочий проект.")
-            return
-            
-        from core.vector_db import VectorDatabase
-        try:
-            db = VectorDatabase(self.project_path)
-            dlg = RAGAnalyticsDialog(self, db, self.settings)
-            dlg.exec()
-        except Exception as e:
-            self.log_system(f"Ошибка открытия базы RAG: {e}", "#ff4444")
-
-    def start_rag_indexing(self):
-        if hasattr(self, 'indexer_worker') and self.indexer_worker.isRunning():
-            self.indexer_worker.stop()
-            self.btn_rag.setText("⏳ Остановка...")
-            self.btn_rag.setEnabled(False)
-            return
-            
-        if not self.project_path or self.project_path == QDir.currentPath() or len(self.project_path) <= 3:
-            self.show_popup("Ошибка", "Сначала выберите или создайте рабочий проект в Менеджере Проектов.", is_error=True)
-            return
-            
-        reply = self.show_question("RAG Индексация", 
-                                   "Запустить семантическую индексацию проекта?\nЭто может занять некоторое время в зависимости от размера кодовой базы.")
-        if reply == QMessageBox.StandardButton.No:
-            return
-
-        self.btn_rag.setEnabled(True)
-        self.btn_rag.setText("🛑 Стоп RAG")
-        self.btn_rag.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold; border-radius: 4px; padding: 0 15px;")
-        
-        self.indexer_worker = IndexerWorker(self.project_path, self.file_manager)
-        self.indexer_worker.progress_signal.connect(self._on_indexer_progress)
-        self.indexer_worker.log_signal.connect(self.log_system)
-        self.indexer_worker.finished_signal.connect(self._on_indexer_finished)
-        self.indexer_worker.error_signal.connect(self._on_indexer_error)
-        
-        self.indexer_worker.start()
-
     def trigger_silent_rag_update(self):
-        """Фоновое обновление индекса только для измененных файлов"""
-        if not self.settings.value("auto_rag_update", True, type=bool):
-            return 
+        self.rag_controller.trigger_silent_update()
 
-        if hasattr(self, 'indexer_worker') and self.indexer_worker.isRunning():
-            return 
-
-        self.btn_rag.setStyleSheet("background-color: #e6a822; color: black; font-weight: bold; border-radius: 4px; padding: 0 15px;")
-        self.btn_rag.setText("⏳ RAG...")
-        
-        self.indexer_worker = IndexerWorker(self.project_path, self.file_manager, silent=True)
-        self.indexer_worker.finished_signal.connect(self._on_silent_rag_finished)
-        self.indexer_worker.start()
-
-    def _on_silent_rag_finished(self):
-        self.btn_rag.setText("🧠 RAG (Индекс)")
-        self.btn_rag.setStyleSheet("background-color: #00838f; color: white; font-weight: bold; border-radius: 4px; padding: 0 15px;")
-
-    def _on_indexer_progress(self, current, total, filename):
-        self.status_bar.showMessage(f"🔄 Индексация (RAG): {current}/{total} | Файл: {filename}")
-
-    def _on_indexer_finished(self):
-        self.btn_rag.setEnabled(True)
-        self.btn_rag.setText("🧠 RAG (Индекс)")
-        self.btn_rag.setStyleSheet("background-color: #00838f; color: white; font-weight: bold; border-radius: 4px; padding: 0 15px;")
-        self.update_status_bar() 
-        self.show_popup("Готово", "Индексация проекта успешно завершена (или остановлена)!\nТеперь ИИ 'знает' вашу кодовую базу.")
-
-    def _on_indexer_error(self, err_msg):
-        self.btn_rag.setEnabled(True)
-        self.btn_rag.setText("🧠 RAG (Индекс)")
-        self.btn_rag.setStyleSheet("background-color: #00838f; color: white; font-weight: bold; border-radius: 4px; padding: 0 15px;")
-        self.update_status_bar()
-        self.show_popup("Ошибка индексации", f"Произошла ошибка при векторизации:\n{err_msg}", is_error=True)
-        self.log_system(f"Ошибка RAG: {err_msg}", "#ff4444")
-
-    # ==========================================
-    # УПРАВЛЕНИЕ ПРОЕКТАМИ И СРЕДОЙ (DR / GIT)
-    # ==========================================
     def handle_project_changed(self, new_path):
         self.project_path = new_path
         self.settings.setValue("last_project_path", new_path)
@@ -590,6 +332,7 @@ class MainWindow(QMainWindow):
         self.git_manager = GitManager(new_path)
         self.prompt_input.project_path = new_path
         self.terminal.update_project_path(new_path)
+        self.rag_controller.setup_watcher()
         
         self.current_file_path = None
         self.editor.setText("")
@@ -612,30 +355,23 @@ class MainWindow(QMainWindow):
 
     def _check_project_environment(self):
         self.update_git_status()
-        
-        if self.project_path == QDir.currentPath() or len(self.project_path) <= 3:
-            return
+        if self.project_path == QDir.currentPath() or len(self.project_path) <= 3: return
             
         if not self.git_manager.is_repo():
-            reply = self.show_question("Система контроля версий", 
-                                       "В этом проекте нет Git-репозитория.\nИнициализировать его прямо сейчас?")
+            reply = self.show_question("Система контроля версий", "В этом проекте нет Git-репозитория.\nИнициализировать его прямо сейчас?")
             if reply == QMessageBox.StandardButton.Yes:
                 success, msg = self.git_manager.init_repo()
                 if success:
                     self.log_system("Git репозиторий инициализирован!", color="#31a24c")
                     self.update_git_status()
-                else:
-                    self.show_popup("Ошибка", f"Не удалось инициализировать Git:\n{msg}", is_error=True)
+                else: self.show_popup("Ошибка", f"Не удалось инициализировать Git:\n{msg}", is_error=True)
                     
         venv_path = os.path.join(self.project_path, 'venv')
         req_path = os.path.join(self.project_path, 'requirements.txt')
         if not os.path.exists(venv_path) and os.path.exists(req_path):
-            reply = self.show_question("Восстановление среды", 
-                                       "Виртуальное окружение (venv) не найдено, но есть requirements.txt.\nВосстановить среду (создать venv и установить пакеты)?")
+            reply = self.show_question("Восстановление среды", "Виртуальное окружение (venv) не найдено, но есть requirements.txt.\nВосстановить среду?")
             if reply == QMessageBox.StandardButton.Yes:
-                if not self.btn_terminal.isChecked():
-                    self.btn_terminal.click() 
-                
+                if not self.btn_terminal.isChecked(): self.btn_terminal.click() 
                 self.log_system("Запуск скрипта восстановления среды (Disaster Recovery)...", color="#e6a822")
                 if os.name == 'nt':
                     self.terminal.execute_cmd("python -m venv venv")
@@ -654,19 +390,13 @@ class MainWindow(QMainWindow):
                 content = log.get("content", "")
                 safe_content = content.replace('<', '&lt;').replace('>', '&gt;').replace('\n', '<br>')
                 
-                if role == "USER":
-                    self.chat_history.append(f"<br><span style='color: #569cd6;'><b>ВЫ:</b> {safe_content}</span>")
-                elif role == "AI":
-                    self.chat_history.append(f"<span style='color: #31a24c;'><b>[МЫСЛИ ИИ]:</b> {safe_content}</span>")
-                elif role == "SYSTEM":
-                    self.chat_history.append(f"<span style='color: #0e639c;'><b>[СИСТЕМА] {safe_content}</b></span>")
+                if role == "USER": self.chat_history.append(f"<br><span style='color: #569cd6;'><b>ВЫ:</b> {safe_content}</span>")
+                elif role == "AI": self.chat_history.append(f"<span style='color: #31a24c;'><b>[МЫСЛИ ИИ]:</b> {safe_content}</span>")
+                elif role == "SYSTEM": self.chat_history.append(f"<span style='color: #0e639c;'><b>[СИСТЕМА] {safe_content}</b></span>")
                     
             self.chat_history.append("<br><span style='color: #888888;'><i>--- Текущая сессия ---</i></span><br>")
             self.scroll_chat()
 
-    # ==========================================
-    # ПРОЧИЕ ОБРАБОТЧИКИ И ДИАЛОГИ
-    # ==========================================
     def handle_tree_tags(self, files, is_attach):
         formatted_files = [f"@[{f}]" for f in files]
         text = " ".join(formatted_files) + " "
@@ -716,6 +446,7 @@ class MainWindow(QMainWindow):
             self.show_raw_text_dialog("Сырой запрос к ИИ", self.last_full_prompt)
 
     def show_raw_text_dialog(self, title, text):
+        from PyQt6.QtWidgets import QVBoxLayout
         dlg = QDialog(self)
         dlg.setWindowTitle(title)
         dlg.resize(800, 600)
@@ -737,7 +468,7 @@ class MainWindow(QMainWindow):
         msg.exec()
 
     def show_question(self, title, message):
-        """Собственное диалоговое окно для защиты от белой темы Windows"""
+        from PyQt6.QtWidgets import QLabel
         dlg = QDialog(self)
         dlg.setWindowTitle(title)
         dlg.resize(400, 150)
@@ -762,7 +493,6 @@ class MainWindow(QMainWindow):
         btn_layout.addWidget(btn_yes)
         btn_layout.addWidget(btn_no)
         layout.addLayout(btn_layout)
-        
         return dlg.exec()
 
     def update_status_bar(self):
@@ -773,12 +503,12 @@ class MainWindow(QMainWindow):
         if self.btn_pause.isChecked():
             self.ai_controller.bridge.is_paused = True
             self.btn_pause.setText("▶ Продолжить")
-            self.btn_pause.setStyleSheet("background-color: #31a24c; color: white; font-weight: bold; border-radius: 4px; padding: 0 15px;")
+            self.btn_pause.setStyleSheet("background-color: #31a24c; color: white; font-weight: bold; border-radius: 3px; padding: 2px 10px; font-size: 11px; margin-left: 5px;")
             self.log_system("⏸ РАБОТА ПРИОСТАНОВЛЕНА", color="#ffaa00")
         else:
             self.ai_controller.bridge.is_paused = False
             self.btn_pause.setText("■ Пауза")
-            self.btn_pause.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold; border-radius: 4px; padding: 0 15px;")
+            self.btn_pause.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold; border-radius: 3px; padding: 2px 10px; font-size: 11px; margin-left: 5px;")
             self.log_system("▶ РАБОТА ВОЗОБНОВЛЕНА", color="#31a24c")
 
     def show_history(self):
@@ -793,58 +523,3 @@ class MainWindow(QMainWindow):
     def scroll_chat(self):
         scrollbar = self.chat_history.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
-
-    def update_tabs_ui(self):
-        if not hasattr(self, 'ai_controller') or not hasattr(self.ai_controller.bridge, 'get_active_tabs'):
-            return
-            
-        raw_tabs = self.ai_controller.bridge.get_active_tabs()
-
-        if not raw_tabs:
-            if self.combo_tabs.count() != 1 or self.combo_tabs.itemText(0) != "🔴 Нет связи":
-                self.combo_tabs.blockSignals(True)
-                self.combo_tabs.clear()
-                self.combo_tabs.addItem("🔴 Нет связи")
-                self.combo_tabs.blockSignals(False)
-            return
-
-        incoming_tabs = {}
-        for t in raw_tabs:
-            if "[" in t and "]" in t:
-                t_id = t.split("[")[-1].split("]")[0]
-                incoming_tabs[t_id] = f"🟢 {t}"
-
-        current_tabs = {}
-        for i in range(self.combo_tabs.count()):
-            text = self.combo_tabs.itemText(i)
-            if "[" in text and "]" in text:
-                t_id = text.split("[")[-1].split("]")[0]
-                current_tabs[t_id] = (i, text)
-
-        if set(incoming_tabs.keys()) == set(current_tabs.keys()):
-            self.combo_tabs.blockSignals(True)
-            for t_id, (index, old_text) in current_tabs.items():
-                new_text = incoming_tabs[t_id]
-                if old_text != new_text:
-                    self.combo_tabs.setItemText(index, new_text)
-            self.combo_tabs.blockSignals(False)
-            return
-
-        self.combo_tabs.blockSignals(True)
-        self.combo_tabs.clear()
-
-        for t_id in sorted(incoming_tabs.keys()):
-            self.combo_tabs.addItem(incoming_tabs[t_id])
-
-        if self.locked_tab_id:
-            for i in range(self.combo_tabs.count()):
-                if f"[{self.locked_tab_id}]" in self.combo_tabs.itemText(i):
-                    self.combo_tabs.setCurrentIndex(i)
-                    break
-        else:
-            if self.combo_tabs.count() > 0:
-                text = self.combo_tabs.itemText(0)
-                if "[" in text and "]" in text:
-                    self.locked_tab_id = text.split("[")[-1].split("]")[0]
-
-        self.combo_tabs.blockSignals(False)

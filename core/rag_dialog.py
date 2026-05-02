@@ -1,3 +1,4 @@
+import os
 from datetime import datetime
 from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
                              QProgressBar, QCheckBox, QTableWidget, 
@@ -22,7 +23,6 @@ class RAGAnalyticsDialog(QDialog):
         lbl_limits.setStyleSheet("font-size: 14px; font-weight: bold; color: #569cd6;")
         layout.addWidget(lbl_limits)
 
-        # Читаем счетчик за сегодня
         today = datetime.now().strftime("%Y-%m-%d")
         saved_date = self.settings.value("rag_usage_date", "")
         if saved_date != today:
@@ -40,10 +40,9 @@ class RAGAnalyticsDialog(QDialog):
         self.progress.setFormat(f" {usage_today} / {max_requests} запросов ")
         self.progress.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
-        # Меняем цвет в зависимости от расхода
-        color = "#31a24c" # Зеленый
-        if usage_today > 1000: color = "#e6a822" # Желтый
-        if usage_today > 1400: color = "#d32f2f" # Красный
+        color = "#31a24c"
+        if usage_today > 1000: color = "#e6a822"
+        if usage_today > 1400: color = "#d32f2f"
         
         self.progress.setStyleSheet(f"""
             QProgressBar {{ border: 1px solid #3c3c3c; border-radius: 4px; background-color: #252526; text-align: center; color: white; font-weight: bold; }}
@@ -59,7 +58,6 @@ class RAGAnalyticsDialog(QDialog):
             QCheckBox::indicator { width: 16px; height: 16px; border: 1px solid #888; border-radius: 3px; background-color: #252526; }
             QCheckBox::indicator:checked { background-color: #0e639c; border: 1px solid #0e639c; }
         """)
-        # ИСПРАВЛЕНИЕ: Теперь включено по умолчанию!
         self.cb_auto.setChecked(self.settings.value("auto_rag_update", True, type=bool))
         self.cb_auto.stateChanged.connect(lambda state: self.settings.setValue("auto_rag_update", bool(state)))
         layout.addWidget(self.cb_auto)
@@ -73,16 +71,27 @@ class RAGAnalyticsDialog(QDialog):
         self.table = QTableWidget()
         self.table.setColumnCount(4)
         self.table.setHorizontalHeaderLabels(["Файл", "MD5 Хэш", "Векторов (Чанков)", "Дата индексации"])
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.table.horizontalHeader().setStretchLastSection(True)
         self.table.verticalHeader().setVisible(False)
         self.table.setStyleSheet("""
-            QTableWidget { background-color: #252526; color: #d4d4d4; gridline-color: #3c3c3c; border: 1px solid #3c3c3c; font-size: 13px; }
+            QTableWidget { background-color: #252526; color: #d4d4d4; gridline-color: #3c3c3c; border: 1px solid #3c3c3c; font-size: 13px; outline: none;}
             QHeaderView::section { background-color: #1e1e1e; color: #aaaaaa; padding: 6px; border: 1px solid #3c3c3c; font-weight: bold; }
             QTableWidget::item { padding: 4px; }
+            QTableWidget::item:selected { background-color: #37373d; }
         """)
         layout.addWidget(self.table)
 
         self.populate_table()
+
+        state = self.settings.value("rag_table_state")
+        if state:
+            self.table.horizontalHeader().restoreState(state)
+        else:
+            self.table.setColumnWidth(0, 350)
+            self.table.setColumnWidth(1, 100)
+            self.table.setColumnWidth(2, 130)
 
         btn_close = QPushButton("Закрыть")
         btn_close.setStyleSheet("background-color: #333333; padding: 8px 20px; border-radius: 4px; font-weight: bold;")
@@ -95,6 +104,10 @@ class RAGAnalyticsDialog(QDialog):
 
     def populate_table(self):
         if not self.db: return
+        
+        # ОТКЛЮЧАЕМ сортировку на время заполнения (важно для производительности)
+        self.table.setSortingEnabled(False)
+        
         stats = self.db.get_all_files_stats()
         self.table.setRowCount(len(stats))
         
@@ -107,7 +120,9 @@ class RAGAnalyticsDialog(QDialog):
             item_hash.setFlags(item_hash.flags() & ~Qt.ItemFlag.ItemIsEditable)
             item_hash.setForeground(Qt.GlobalColor.darkGray)
             
-            item_chunks = QTableWidgetItem(str(info["chunk_count"]))
+            # ИСПРАВЛЕНИЕ ДЛЯ СОРТИРОВКИ: Записываем именно число (int), а не строку
+            item_chunks = QTableWidgetItem()
+            item_chunks.setData(Qt.ItemDataRole.DisplayRole, info["chunk_count"])
             item_chunks.setFlags(item_chunks.flags() & ~Qt.ItemFlag.ItemIsEditable)
             item_chunks.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             
@@ -119,3 +134,12 @@ class RAGAnalyticsDialog(QDialog):
             self.table.setItem(row, 2, item_chunks)
             self.table.setItem(row, 3, item_date)
             row += 1
+
+        # ВКЛЮЧАЕМ сортировку и сортируем по дате индексации (столбец 3, по убыванию)
+        self.table.setSortingEnabled(True)
+        self.table.sortItems(3, Qt.SortOrder.DescendingOrder)
+
+    def closeEvent(self, event):
+        if self.settings:
+            self.settings.setValue("rag_table_state", self.table.horizontalHeader().saveState())
+        super().closeEvent(event)
