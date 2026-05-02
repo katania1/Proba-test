@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTreeView,
 from PyQt6.QtCore import Qt, QDir, pyqtSignal, QModelIndex
 from PyQt6.QtGui import QFileSystemModel, QColor, QBrush, QAction, QIcon
 
-from core.project_manager import ProjectManagerDialog # Импортируем наш новый менеджер
+from core.project_manager import ProjectManagerDialog
 
 class GitIgnoreModel(QFileSystemModel):
     def __init__(self, project_path):
@@ -28,13 +28,18 @@ class GitIgnoreModel(QFileSystemModel):
         self.layoutChanged.emit()
 
     def is_ignored(self, file_path):
-        if not self.project_path or not file_path.startswith(self.project_path):
+        # ИСПРАВЛЕНИЕ: Qt всегда возвращает пути с '/', а Windows (os.path.normpath) с '\'.
+        # Приводим оба пути к единому стандарту ОС перед сравнением.
+        norm_file_path = os.path.normpath(file_path)
+        norm_proj_path = os.path.normpath(self.project_path)
+
+        if not norm_proj_path or not norm_file_path.startswith(norm_proj_path):
             return False
             
-        rel_path = os.path.relpath(file_path, self.project_path).replace('\\', '/')
+        rel_path = os.path.relpath(norm_file_path, norm_proj_path).replace('\\', '/')
         if rel_path == '.': return False
 
-        is_dir = os.path.isdir(file_path)
+        is_dir = os.path.isdir(norm_file_path)
 
         for rule in self.ignore_rules:
             if rule.endswith('/'):
@@ -73,7 +78,6 @@ class FileExplorerWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # --- НОВАЯ КНОПКА МЕНЕДЖЕРА ПРОЕКТОВ ---
         self.btn_project_manager = QPushButton(f"📂 {os.path.basename(self.project_path)}")
         self.btn_project_manager.setStyleSheet("""
             QPushButton {
@@ -90,7 +94,6 @@ class FileExplorerWidget(QWidget):
         """)
         self.btn_project_manager.clicked.connect(self.open_project_manager)
         layout.addWidget(self.btn_project_manager)
-        # ----------------------------------------
 
         toolbar = QHBoxLayout()
         toolbar.setContentsMargins(5, 5, 5, 5)

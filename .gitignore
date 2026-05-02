@@ -19,5 +19,8 @@ proba3.py
 proba
 
 proba1.py
-__pycache__/
-*.pyc
+__pycache__/
+
+*.pyc
+# Local IDE Configs
+config/
