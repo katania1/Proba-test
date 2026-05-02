@@ -166,7 +166,7 @@ class MainWindow(QMainWindow):
         self.prompt_input.media_attached_signal.connect(self.attachment_panel.add_attachment)
         
         input_layout.addWidget(self.prompt_input)
-        input_layout.addWidget(self.attachment_panel) # Панель картинок теперь под полем ввода
+        input_layout.addWidget(self.attachment_panel) 
         
         chat_splitter.addWidget(input_container)
         chat_splitter.setSizes([600, 200])
@@ -287,7 +287,8 @@ class MainWindow(QMainWindow):
         self.prompt_input.send_signal.connect(self.ai_controller.send_task)
         self.btn_relay.clicked.connect(self.ai_controller.force_relay)
 
-        self.update_git_status()
+        self._check_project_environment()
+        self._load_recent_chat_history()
 
     # --- МЕТОДЫ СЕЛЕКТОРА ДВИЖКА ---
     def _add_engine_category(self, title):
@@ -352,7 +353,7 @@ class MainWindow(QMainWindow):
                     for m in c_models:
                         self._add_engine_item(m, p_id, icon="⚡")
         except Exception as e:
-            print(f"Ошибка парсинга кастомных провайдеров: {e}")
+            pass
 
         last_selection = self.settings.value("last_engine", "  🌐 Gemini Web")
         index = self.combo_engine.findText(last_selection)
@@ -372,7 +373,6 @@ class MainWindow(QMainWindow):
             self.refresh_engine_list()
 
     def open_attachment_dialog(self):
-        """Открывает диалог выбора картинок и добавляет их в панель"""
         files, _ = QFileDialog.getOpenFileNames(
             self, 
             "Выберите картинки", 
@@ -427,16 +427,108 @@ class MainWindow(QMainWindow):
                 return True 
         return super().eventFilter(obj, event)
 
+    # ==========================================
+    # УПРАВЛЕНИЕ ПРОЕКТАМИ И СРЕДОЙ (DR / GIT)
+    # ==========================================
     def handle_project_changed(self, new_path):
         self.project_path = new_path
         self.settings.setValue("last_project_path", new_path)
+        
+        # Обновляем менеджеры
         self.file_manager = FileManager(new_path)
         self.chat_logger = ChatLogger(new_path)
         self.git_manager = GitManager(new_path)
         self.prompt_input.project_path = new_path
         self.terminal.update_project_path(new_path)
-        self.update_git_status()
+        
+        # Очистка UI редактора
+        self.current_file_path = None
+        self.editor.setText("")
+        self.editor_tabs.setTabText(0, "Ничего не открыто")
+        
+        # Сброс кэша ревью
+        self.memory_old_code = None
+        self.proposed_updates = []
+        self.btn_reject_main.setVisible(False)
+        self.btn_approve.setText("✅ Утвердить код")
+        
+        # Очистка прикрепленных файлов (Сброс контекста ИИ)
+        self.attached_files.clear()
+        self.prompt_input.highlighter.rehighlight()
+        self.attachment_panel.clear()
+        
+        # Очистка чата
+        self.chat_history.clear()
+        self.log_system(f"Проект успешно загружен: {os.path.basename(new_path)}")
+        
+        self._check_project_environment()
+        self._load_recent_chat_history()
 
+    def _check_project_environment(self):
+        self.update_git_status()
+        
+        # Не терроризируем пользователя Git-запросами, если он открыл системную папку
+        if self.project_path == QDir.currentPath() or len(self.project_path) <= 3:
+            return
+            
+        # 1. Проверка Git (Авто-инициализация)
+        if not self.git_manager.is_repo():
+            reply = QMessageBox.question(self, "Система контроля версий", 
+                                         "В этом проекте нет Git-репозитория.\nИнициализировать его прямо сейчас?",
+                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if reply == QMessageBox.StandardButton.Yes:
+                success, msg = self.git_manager.init_repo()
+                if success:
+                    self.log_system("Git репозиторий инициализирован!", color="#31a24c")
+                    self.update_git_status()
+                else:
+                    self.show_popup("Ошибка", f"Не удалось инициализировать Git:\n{msg}", is_error=True)
+                    
+        # 2. Проверка venv (Disaster Recovery)
+        venv_path = os.path.join(self.project_path, 'venv')
+        req_path = os.path.join(self.project_path, 'requirements.txt')
+        if not os.path.exists(venv_path) and os.path.exists(req_path):
+            reply = QMessageBox.question(self, "Восстановление среды", 
+                                         "Виртуальное окружение (venv) не найдено, но есть requirements.txt.\nВосстановить среду (создать venv и установить пакеты)?",
+                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if reply == QMessageBox.StandardButton.Yes:
+                if not self.btn_terminal.isChecked():
+                    self.btn_terminal.click() 
+                
+                self.log_system("Запуск скрипта восстановления среды (Disaster Recovery)...", color="#e6a822")
+                if os.name == 'nt':
+                    self.terminal.execute_cmd("python -m venv venv")
+                    self.terminal.execute_cmd(f'"{os.path.join("venv", "Scripts", "activate.bat")}"')
+                else:
+                    self.terminal.execute_cmd("python3 -m venv venv")
+                    self.terminal.execute_cmd("source venv/bin/activate")
+                self.terminal.execute_cmd("pip install -r requirements.txt")
+
+    def _load_recent_chat_history(self):
+        """Подгружает последние сообщения из базы логов для сохранения визуального контекста"""
+        logs = self.chat_logger.get_all()
+        if logs:
+            self.chat_history.append("<br><span style='color: #888888;'><i>--- История предыдущей сессии (последние 20 сообщений) ---</i></span>")
+            for log in logs[-20:]:
+                role = log.get("role", "")
+                content = log.get("content", "")
+                
+                # Защита от HTML тегов, чтобы не ломать верстку окна
+                safe_content = content.replace('<', '&lt;').replace('>', '&gt;').replace('\n', '<br>')
+                
+                if role == "USER":
+                    self.chat_history.append(f"<br><span style='color: #569cd6;'><b>ВЫ:</b> {safe_content}</span>")
+                elif role == "AI":
+                    self.chat_history.append(f"<span style='color: #31a24c;'><b>[МЫСЛИ ИИ]:</b> {safe_content}</span>")
+                elif role == "SYSTEM":
+                    self.chat_history.append(f"<span style='color: #0e639c;'><b>[СИСТЕМА] {safe_content}</b></span>")
+                    
+            self.chat_history.append("<br><span style='color: #888888;'><i>--- Текущая сессия ---</i></span><br>")
+            self.scroll_chat()
+
+    # ==========================================
+    # ПРОЧИЕ ОБРАБОТЧИКИ
+    # ==========================================
     def handle_tree_tags(self, files, is_attach):
         formatted_files = [f"@[{f}]" for f in files]
         text = " ".join(formatted_files) + " "

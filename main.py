@@ -1,5 +1,7 @@
 import sys
+import os
 from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore import QSettings
 from core.ui_main import MainWindow
 
 # Глобальная темная тема (CSS для PyQt)
@@ -41,7 +43,36 @@ QSplitter::handle:hover { background-color: #0e639c; }
 def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion") 
-    app.setStyleSheet(DARK_THEME) # Применяем дизайн
+    app.setStyleSheet(DARK_THEME)
+    
+    # 1. Задаем глобальные имена ПЕРЕД настройкой путей
+    app.setOrganizationName("VibeCoder")
+    app.setApplicationName("IDE")
+    
+    # 2. Создаем директории (Qt иногда не может сам создать вложенную папку)
+    app_dir = os.path.dirname(os.path.abspath(__file__))
+    config_dir = os.path.join(app_dir, "config")
+    vibe_dir = os.path.join(config_dir, "VibeCoder") # Вложенная папка организации
+    
+    os.makedirs(config_dir, exist_ok=True)
+    os.makedirs(vibe_dir, exist_ok=True) # КРИТИЧНОЕ ИСПРАВЛЕНИЕ
+    
+    # 3. Принудительно переключаем QSettings на локальные INI файлы
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, config_dir)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.SystemScope, config_dir)
+    
+    # 4. Тестовая запись и проверка
+    pref = QSettings("VibeCoder", "Preferences")
+    pref.setValue("portable_mode", True)
+    pref.sync()
+    
+    api = QSettings("VibeCoder", "API_Config")
+    api.setValue("init", True)
+    api.sync()
+    
+    # Выводим в консоль терминала точный путь, где создался файл
+    print(f"[VibeCoder] Настройки сохраняются в: {pref.fileName()}")
     
     window = MainWindow()
     window.show()

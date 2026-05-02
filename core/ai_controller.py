@@ -36,7 +36,13 @@ class AIController(QObject):
     def estimate_tokens(self, text):
         return int(len(text) / 2.5)
 
+    def _encode_image_base64(self, filepath):
+        import base64
+        with open(filepath, "rb") as f:
+            return base64.b64encode(f.read()).decode('utf-8')
+
     def send_task(self):
+        import mimetypes
         user_text = self.mw.prompt_input.toPlainText().strip()
         if not user_text: return
         
@@ -51,18 +57,19 @@ class AIController(QObject):
             self.mw.show_popup("Ошибка связи", "Нет активных вкладок браузера!\nОткройте Gemini и обновите страницу.", is_error=True)
             return
 
-        # ЗАБИРАЕМ КАРТИНКИ ИЗ ПАНЕЛИ
+        # ЗАБИРАЕМ КАРТИНКИ И КОДИРУЕМ ИХ
         image_paths = list(self.mw.attachment_panel.get_attachments())
-
-        # Если выбран браузер и есть картинки — предупреждаем
-        if provider_id == "Browser" and image_paths:
-            self.mw.show_popup(
-                "Ограничение браузера", 
-                "Отправка картинок напрямую в браузерную вкладку пока не поддерживается.\n\n"
-                "Пожалуйста, используйте API (переключите движок) или прикрепите картинку вручную на сайте Gemini.", 
-                is_error=True
-            )
-            return
+        image_payload = []
+        if image_paths:
+            for path in image_paths:
+                base64_img = self._encode_image_base64(path)
+                mime_type, _ = mimetypes.guess_type(path)
+                if not mime_type: mime_type = "image/jpeg"
+                image_payload.append({
+                    "mime": mime_type,
+                    "data": base64_img,
+                    "name": os.path.basename(path)
+                })
 
         attached_blocks = []
         tags_in_text = re.findall(r'@\[.*?\]|@[\w\.\-\/\\]+', user_text)
@@ -98,10 +105,11 @@ class AIController(QObject):
         self.retry_count = 0 
         
         self.mw.prompt_input.clear()
-        self.mw.attachment_panel.clear() # Очищаем панель картинок после отправки
+        self.mw.attachment_panel.clear() 
         
         if provider_id == "Browser":
-            self.bridge.add_task(self.mw.last_full_prompt, is_relay=False, target_id=target_id)
+            # ---> ПЕРЕДАЕМ КАРТИНКИ В МОСТ <---
+            self.bridge.add_task(self.mw.last_full_prompt, is_relay=False, target_id=target_id, images=image_payload)
             self.mw.log_system(f"Задача отправлена во вкладку '{tab_display_name}'. Ожидание ответа...")
         else:
             self.execute_api_task(provider_id, selected_model, image_paths)

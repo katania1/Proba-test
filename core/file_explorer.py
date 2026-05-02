@@ -5,6 +5,8 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTreeView,
 from PyQt6.QtCore import Qt, QDir, pyqtSignal, QModelIndex
 from PyQt6.QtGui import QFileSystemModel, QColor, QBrush, QAction, QIcon
 
+from core.project_manager import ProjectManagerDialog # Импортируем наш новый менеджер
+
 class GitIgnoreModel(QFileSystemModel):
     def __init__(self, project_path):
         super().__init__()
@@ -22,7 +24,7 @@ class GitIgnoreModel(QFileSystemModel):
                     if line and not line.startswith('#'):
                         self.ignore_rules.append(line.replace('\\', '/'))
         
-        self.ignore_rules.extend(['.git/', '.vibecoder/'])
+        self.ignore_rules.extend(['.git/', '.vibecoder/', 'venv/', '__pycache__/'])
         self.layoutChanged.emit()
 
     def is_ignored(self, file_path):
@@ -71,13 +73,27 @@ class FileExplorerWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
+        # --- НОВАЯ КНОПКА МЕНЕДЖЕРА ПРОЕКТОВ ---
+        self.btn_project_manager = QPushButton(f"📂 {os.path.basename(self.project_path)}")
+        self.btn_project_manager.setStyleSheet("""
+            QPushButton {
+                background-color: #2d2d30;
+                color: #d4d4d4;
+                font-size: 14px;
+                font-weight: bold;
+                text-align: left;
+                padding: 10px;
+                border: none;
+                border-bottom: 2px solid #0e639c;
+            }
+            QPushButton:hover { background-color: #3e3e42; }
+        """)
+        self.btn_project_manager.clicked.connect(self.open_project_manager)
+        layout.addWidget(self.btn_project_manager)
+        # ----------------------------------------
+
         toolbar = QHBoxLayout()
         toolbar.setContentsMargins(5, 5, 5, 5)
-
-        self.btn_change_dir = QPushButton("📂")
-        self.btn_change_dir.setToolTip("Выбрать другую папку проекта")
-        self.btn_change_dir.setObjectName("FileToolBtn")
-        self.btn_change_dir.clicked.connect(self.change_project_dir)
 
         self.btn_new_file = QPushButton("📄")
         self.btn_new_file.setToolTip("Создать файл")
@@ -99,7 +115,6 @@ class FileExplorerWidget(QWidget):
         self.btn_delete.setObjectName("FileToolBtn")
         self.btn_delete.clicked.connect(self.delete_item)
 
-        toolbar.addWidget(self.btn_change_dir)
         toolbar.addWidget(self.btn_new_file)
         toolbar.addWidget(self.btn_new_folder)
         toolbar.addWidget(self.btn_rename)
@@ -133,16 +148,18 @@ class FileExplorerWidget(QWidget):
 
         layout.addWidget(self.tree)
 
-    def change_project_dir(self):
-        dir_path = QFileDialog.getExistingDirectory(self, "Выберите папку проекта", self.project_path)
-        if dir_path:
-            self.project_path = dir_path
-            self.model.project_path = dir_path
-            self.model.setRootPath(dir_path)
-            self.tree.setRootIndex(self.model.index(dir_path))
-            self.model.update_rules()
-            self.project_changed.emit(dir_path)
-            self.log_message.emit(f"Проект изменен на: {dir_path}")
+    def open_project_manager(self):
+        dialog = ProjectManagerDialog(self)
+        if dialog.exec():
+            new_path = dialog.selected_project_path
+            if new_path and new_path != self.project_path:
+                self.project_path = new_path
+                self.model.project_path = new_path
+                self.model.setRootPath(new_path)
+                self.tree.setRootIndex(self.model.index(new_path))
+                self.model.update_rules()
+                self.btn_project_manager.setText(f"📂 {os.path.basename(new_path)}")
+                self.project_changed.emit(new_path)
 
     def refresh_ignore_rules(self):
         self.model.update_rules()
