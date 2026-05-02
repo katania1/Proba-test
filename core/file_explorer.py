@@ -12,10 +12,14 @@ class GitIgnoreModel(QFileSystemModel):
         super().__init__()
         self.project_path = project_path
         self.ignore_rules = []
+        self.vibe_rules = []
         self.update_rules()
 
     def update_rules(self):
         self.ignore_rules = []
+        self.vibe_rules = []
+        
+        # 1. Читаем правила Git
         gitignore_path = os.path.join(self.project_path, '.gitignore')
         if os.path.exists(gitignore_path):
             with open(gitignore_path, 'r', encoding='utf-8') as f:
@@ -25,11 +29,20 @@ class GitIgnoreModel(QFileSystemModel):
                         self.ignore_rules.append(line.replace('\\', '/'))
         
         self.ignore_rules.extend(['.git/', '.vibecoder/', 'venv/', '__pycache__/'])
+
+        # 2. Читаем правила RAG (VibeCoder)
+        vibeignore_path = os.path.join(self.project_path, '.vibeignore')
+        if os.path.exists(vibeignore_path):
+            with open(vibeignore_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        self.vibe_rules.append(line.replace('\\', '/'))
+
         self.layoutChanged.emit()
 
-    def is_ignored(self, file_path):
-        # ИСПРАВЛЕНИЕ: Qt всегда возвращает пути с '/', а Windows (os.path.normpath) с '\'.
-        # Приводим оба пути к единому стандарту ОС перед сравнением.
+    def _check_rules(self, file_path, rules):
+        # Приводим оба пути к единому стандарту ОС перед сравнением
         norm_file_path = os.path.normpath(file_path)
         norm_proj_path = os.path.normpath(self.project_path)
 
@@ -41,7 +54,7 @@ class GitIgnoreModel(QFileSystemModel):
 
         is_dir = os.path.isdir(norm_file_path)
 
-        for rule in self.ignore_rules:
+        for rule in rules:
             if rule.endswith('/'):
                 if is_dir and (rel_path + '/').startswith(rule): return True
                 if not is_dir and rel_path.startswith(rule): return True
@@ -52,11 +65,33 @@ class GitIgnoreModel(QFileSystemModel):
                 
         return False
 
+    def is_ignored(self, file_path):
+        """Проверка для .gitignore"""
+        return self._check_rules(file_path, self.ignore_rules)
+
+    def is_vibe_ignored(self, file_path):
+        """Проверка для .vibeignore"""
+        return self._check_rules(file_path, self.vibe_rules)
+
+    def is_ignored_for_rag(self, file_path):
+        """Комплексная проверка для индексатора (если файл в ЛЮБОМ из списков)"""
+        return self.is_ignored(file_path) or self.is_vibe_ignored(file_path)
+
     def data(self, index, role):
         if role == Qt.ItemDataRole.ForegroundRole:
             file_path = self.filePath(index)
             if self.is_ignored(file_path):
-                return QBrush(QColor("#666666"))
+                return QBrush(QColor("#666666")) # Темно-серый для мусора Git
+            if self.is_vibe_ignored(file_path):
+                return QBrush(QColor("#a88f22")) # Горчичный для файлов, исключенных из RAG
+                
+        if role == Qt.ItemDataRole.ToolTipRole:
+            file_path = self.filePath(index)
+            if self.is_vibe_ignored(file_path):
+                return "🚫 Исключен из RAG-индексации (.vibeignore)"
+            if self.is_ignored(file_path):
+                return "Игнорируется Git (.gitignore)"
+                
         return super().data(index, role)
 
 
@@ -188,12 +223,17 @@ class FileExplorerWidget(QWidget):
         action_time_machine = menu.addAction("🕒 Машина Времени (Откат бэкапов)")
         menu.addSeparator()
         
+        # Блок Git
         if self.model.is_ignored(file_path):
             action_ignore = menu.addAction("✅ Убрать из .gitignore")
-            is_ignored_now = True
         else:
             action_ignore = menu.addAction("🚫 Добавить в .gitignore")
-            is_ignored_now = False
+
+        # Блок RAG VibeCoder
+        if self.model.is_vibe_ignored(file_path):
+            action_vibe = menu.addAction("✅ Вернуть в индекс (Убрать из .vibeignore)")
+        else:
+            action_vibe = menu.addAction("🚫 Не индексировать в RAG (Добавить в .vibeignore)")
 
         action = menu.exec(self.tree.viewport().mapToGlobal(position))
 
@@ -210,15 +250,21 @@ class FileExplorerWidget(QWidget):
                 self.show_popup_msg.emit("Ошибка", "Машина времени работает только для отдельных файлов.", True)
                 
         elif action == action_ignore:
-            if is_ignored_now:
+            if self.model.is_ignored(file_path):
                 self.remove_from_gitignore(file_path)
             else:
                 self.add_to_gitignore(file_path)
+                
+        elif action == action_vibe:
+            if self.model.is_vibe_ignored(file_path):
+                self.remove_from_vibeignore(file_path)
+            else:
+                self.add_to_vibeignore(file_path)
 
+    # --- МЕТОДЫ .GITIGNORE ---
     def add_to_gitignore(self, file_path):
         rel_path = os.path.relpath(file_path, self.project_path).replace('\\', '/')
-        if os.path.isdir(file_path):
-            rel_path += '/'
+        if os.path.isdir(file_path): rel_path += '/'
             
         gitignore_path = os.path.join(self.project_path, '.gitignore')
         
@@ -230,12 +276,11 @@ class FileExplorerWidget(QWidget):
                 content = f.read().splitlines()
             
             if rel_path in content:
-                self.show_popup_msg.emit("Информация", f"{rel_path} уже находится в игнор-листе.", False)
+                self.show_popup_msg.emit("Информация", f"{rel_path} уже находится в .gitignore", False)
                 return
                 
             with open(gitignore_path, 'a', encoding='utf-8') as f:
-                if os.path.getsize(gitignore_path) > 0:
-                    f.write('\n')
+                if os.path.getsize(gitignore_path) > 0: f.write('\n')
                 f.write(f"{rel_path}\n")
                 
         self.model.update_rules()
@@ -243,15 +288,13 @@ class FileExplorerWidget(QWidget):
 
     def remove_from_gitignore(self, file_path):
         rel_path = os.path.relpath(file_path, self.project_path).replace('\\', '/')
-        if os.path.isdir(file_path):
-            rel_path += '/'
+        if os.path.isdir(file_path): rel_path += '/'
             
         gitignore_path = os.path.join(self.project_path, '.gitignore')
         
         if os.path.exists(gitignore_path):
             with open(gitignore_path, 'r', encoding='utf-8') as f:
                 lines = f.readlines()
-                
             with open(gitignore_path, 'w', encoding='utf-8') as f:
                 for line in lines:
                     if line.strip() != rel_path:
@@ -260,6 +303,50 @@ class FileExplorerWidget(QWidget):
         self.model.update_rules()
         self.log_message.emit(f"✅ {rel_path} удален из .gitignore")
 
+    # --- МЕТОДЫ .VIBEIGNORE ---
+    def add_to_vibeignore(self, file_path):
+        rel_path = os.path.relpath(file_path, self.project_path).replace('\\', '/')
+        if os.path.isdir(file_path): rel_path += '/'
+            
+        vibeignore_path = os.path.join(self.project_path, '.vibeignore')
+        
+        if not os.path.exists(vibeignore_path):
+            with open(vibeignore_path, 'w', encoding='utf-8') as f:
+                f.write("# Файлы и папки, которые VibeCoder НЕ будет добавлять в RAG-индекс\n")
+                f.write(f"{rel_path}\n")
+        else:
+            with open(vibeignore_path, 'r', encoding='utf-8') as f:
+                content = f.read().splitlines()
+            
+            if rel_path in content:
+                self.show_popup_msg.emit("Информация", f"{rel_path} уже находится в .vibeignore", False)
+                return
+                
+            with open(vibeignore_path, 'a', encoding='utf-8') as f:
+                if os.path.getsize(vibeignore_path) > 0: f.write('\n')
+                f.write(f"{rel_path}\n")
+                
+        self.model.update_rules()
+        self.log_message.emit(f"🚫 {rel_path} исключен из RAG-базы (.vibeignore)")
+
+    def remove_from_vibeignore(self, file_path):
+        rel_path = os.path.relpath(file_path, self.project_path).replace('\\', '/')
+        if os.path.isdir(file_path): rel_path += '/'
+            
+        vibeignore_path = os.path.join(self.project_path, '.vibeignore')
+        
+        if os.path.exists(vibeignore_path):
+            with open(vibeignore_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+            with open(vibeignore_path, 'w', encoding='utf-8') as f:
+                for line in lines:
+                    if line.strip() != rel_path:
+                        f.write(line)
+                        
+        self.model.update_rules()
+        self.log_message.emit(f"✅ {rel_path} снова доступен для RAG (.vibeignore)")
+
+    # --- БАЗОВЫЕ ФАЙЛОВЫЕ ОПЕРАЦИИ ---
     def on_double_click(self, index):
         if not self.model.isDir(index):
             file_path = self.model.filePath(index)

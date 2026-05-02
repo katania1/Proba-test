@@ -102,7 +102,6 @@ class ModelDatabaseDialog(QDialog):
                 orig_item = list_widget.item(i)
                 status = orig_item.data(ROLE_STATUS)
                 
-                # Показываем только проверенные (или сломанные) модели
                 if status in ["ok", "error"]:
                     self.table.insertRow(row)
                     
@@ -112,7 +111,6 @@ class ModelDatabaseDialog(QDialog):
                     
                     status_text = "✅ Работает" if status == "ok" else "❌ Ошибка"
                     
-                    # Создаем ячейки, сохраняем ссылку на оригинальный item (orig_item)
                     item_prov = QTableWidgetItem(provider_name)
                     item_prov.setData(Qt.ItemDataRole.UserRole, orig_item)
                     item_prov.setFlags(item_prov.flags() & ~Qt.ItemFlag.ItemIsEditable)
@@ -168,15 +166,15 @@ class ModelDatabaseDialog(QDialog):
             new_note, ok = QInputDialog.getText(self, "Примечание", f"Заметка для {clean_name}:", text=old_note)
             if ok:
                 orig_item.setData(ROLE_NOTE, new_note.strip())
-                self.parent_dialog._update_item_display(orig_item) # Обновляем в главном списке
-                self.table.item(row, 4).setText(new_note.strip()) # Обновляем в таблице
+                self.parent_dialog._update_item_display(orig_item) 
+                self.table.item(row, 4).setText(new_note.strip()) 
                 
         elif action == action_delete:
             orig_item.setData(ROLE_STATUS, "unknown")
             orig_item.setData(ROLE_LAST_TESTED, "")
             orig_item.setData(ROLE_IS_NEW, False)
             orig_item.setData(ROLE_NOTE, "")
-            orig_item.setCheckState(Qt.CheckState.Unchecked) # Снимаем галочку
+            orig_item.setCheckState(Qt.CheckState.Unchecked) 
             self.parent_dialog._update_item_display(orig_item)
             self.table.removeRow(row)
 
@@ -187,9 +185,10 @@ class APISettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("⚙️ Настройки API Провайдеров (Pro)")
-        self.resize(650, 700) 
+        self.resize(650, 750) 
         self.setStyleSheet("background-color: #1e1e1e; color: #d4d4d4;")
         
+        # Читаем портативные настройки из config/VibeCoder/API_Config.ini
         self.settings = QSettings("VibeCoder", "API_Config")
         self.workers = [] 
         self.tabs_ui = {} 
@@ -234,9 +233,10 @@ class APISettingsDialog(QDialog):
         
         layout.addWidget(self.tabs)
 
-        self.create_provider_tab("OpenAI", "🟢 OpenAI", "sk-...", has_base_url=True)
+        # ДОБАВЛЕН ФЛАГ has_embedding_key ДЛЯ OPENAI И GEMINI
+        self.create_provider_tab("OpenAI", "🟢 OpenAI", "sk-...", has_base_url=True, has_embedding_key=True)
         self.create_provider_tab("Anthropic", "🟣 Anthropic", "sk-ant-...", has_base_url=True)
-        self.create_provider_tab("Gemini", "🤖 Gemini API", "AIzaSy...", has_base_url=False)
+        self.create_provider_tab("Gemini", "🤖 Gemini API", "AIzaSy...", has_base_url=False, has_embedding_key=True)
 
         self.load_custom_tabs()
 
@@ -297,7 +297,7 @@ class APISettingsDialog(QDialog):
         item.setText(display_text)
         item.setForeground(color)
 
-    def create_provider_tab(self, provider_id, default_tab_title, key_placeholder, has_base_url=True, is_custom=False):
+    def create_provider_tab(self, provider_id, default_tab_title, key_placeholder, has_base_url=True, is_custom=False, has_embedding_key=False):
         tab_title = self.settings.value(f"{provider_id}_tab_name", default_tab_title)
         
         tab = QWidget()
@@ -305,7 +305,11 @@ class APISettingsDialog(QDialog):
         ui = {'tab_widget': tab} 
         
         creds_layout = QVBoxLayout()
-        creds_layout.addWidget(QLabel("API Key:"))
+        
+        # --- БЛОК 1: Основной ключ (Для генерации кода) ---
+        lbl_main_key = QLabel("API Key (Генерация кода):")
+        lbl_main_key.setStyleSheet("color: #d4d4d4; font-weight: bold;")
+        creds_layout.addWidget(lbl_main_key)
         ui['key'] = self._create_input_field(is_password=True, placeholder=key_placeholder)
         creds_layout.addWidget(ui['key'])
         
@@ -315,6 +319,14 @@ class APISettingsDialog(QDialog):
             creds_layout.addWidget(ui['url'])
         else:
             ui['url'] = None
+            
+        # --- БЛОК 2: Ключ для RAG (Опционально) ---
+        if has_embedding_key:
+            lbl_emb_key = QLabel("Embedding API Key (Для RAG / Индексации проекта):")
+            lbl_emb_key.setStyleSheet("color: #e6a822; font-weight: bold; margin-top: 5px;")
+            creds_layout.addWidget(lbl_emb_key)
+            ui['embedding_key'] = self._create_input_field(is_password=True, placeholder="Если пусто — используется основной ключ")
+            creds_layout.addWidget(ui['embedding_key'])
             
         layout.addLayout(creds_layout)
         layout.addSpacing(5)
@@ -581,7 +593,7 @@ class APISettingsDialog(QDialog):
                 item.setData(ROLE_STATUS, state_info.get("state", "unknown"))
                 item.setData(ROLE_NOTE, state_info.get("note", ""))
                 item.setData(ROLE_LAST_TESTED, state_info.get("last_tested", ""))
-                item.setData(ROLE_IS_NEW, False) # При загрузке с сервера они не считаются "новыми"
+                item.setData(ROLE_IS_NEW, False) 
                 item.setToolTip(state_info.get("msg", ""))
                 
                 self._update_item_display(item)
@@ -655,7 +667,7 @@ class APISettingsDialog(QDialog):
         def on_done(success, msg):
             item.setData(ROLE_STATUS, "ok" if success else "error")
             item.setData(ROLE_LAST_TESTED, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-            item.setData(ROLE_IS_NEW, True) # Помечаем как только что проверенную
+            item.setData(ROLE_IS_NEW, True) 
             
             if not success:
                 item.setToolTip(msg) 
@@ -677,9 +689,12 @@ class APISettingsDialog(QDialog):
         ui['lbl_status'].setStyleSheet("color: #ff4444;")
 
     def load_settings(self):
+        # Читаем основные ключи
         if 'OpenAI' in self.tabs_ui:
             self.tabs_ui['OpenAI']['key'].setText(self.settings.value("openai_api_key", ""))
             self.tabs_ui['OpenAI']['url'].setText(self.settings.value("openai_base_url", "https://api.openai.com/v1"))
+            if 'embedding_key' in self.tabs_ui['OpenAI']:
+                self.tabs_ui['OpenAI']['embedding_key'].setText(self.settings.value("openai_embedding_key", ""))
         
         if 'Anthropic' in self.tabs_ui:
             self.tabs_ui['Anthropic']['key'].setText(self.settings.value("anthropic_api_key", ""))
@@ -687,6 +702,8 @@ class APISettingsDialog(QDialog):
             
         if 'Gemini' in self.tabs_ui:
             self.tabs_ui['Gemini']['key'].setText(self.settings.value("gemini_api_key", ""))
+            if 'embedding_key' in self.tabs_ui['Gemini']:
+                self.tabs_ui['Gemini']['embedding_key'].setText(self.settings.value("gemini_embedding_key", ""))
 
         for p_id, ui in self.tabs_ui.items():
             states_json = self.settings.value(f"{p_id}_model_states", "{}")
@@ -718,6 +735,10 @@ class APISettingsDialog(QDialog):
             
             if not ui['is_custom']:
                 self.settings.setValue(f"{p_id.lower()}_api_key", key_val)
+                # Сохраняем Embedding ключ, если он есть
+                if 'embedding_key' in ui:
+                    self.settings.setValue(f"{p_id.lower()}_embedding_key", ui['embedding_key'].text().strip())
+                    
                 if ui['url']:
                     default_url = "https://api.openai.com/v1" if p_id == "OpenAI" else "https://api.anthropic.com"
                     self.settings.setValue(f"{p_id.lower()}_base_url", url_val or default_url)
@@ -742,7 +763,6 @@ class APISettingsDialog(QDialog):
                 last_tested = item.data(ROLE_LAST_TESTED)
                 is_checked = item.checkState() == Qt.CheckState.Checked
                 
-                # Снимаем бейджик "Новая" при сохранении
                 item.setData(ROLE_IS_NEW, False)
                 self._update_item_display(item)
                 

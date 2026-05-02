@@ -1,0 +1,6 @@
+PyQt6
+PyQt6-QScintilla
+Flask
+Flask-CORS
+requests
+chromadb

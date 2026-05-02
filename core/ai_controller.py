@@ -8,6 +8,8 @@ from core.ai_orchestrator import AIOrchestrator
 from core.bridge import VibeBridge
 from core.api_worker import APIWorker
 from core.providers import OpenAIProvider, AnthropicProvider, GeminiAPIProvider
+from core.vector_db import VectorDatabase
+from core.embeddings import EmbeddingFactory
 
 class AIController(QObject):
     ai_response_signal = pyqtSignal(str)
@@ -41,6 +43,46 @@ class AIController(QObject):
         with open(filepath, "rb") as f:
             return base64.b64encode(f.read()).decode('utf-8')
 
+    def _enrich_with_rag_context(self, user_text):
+        """Ищет релевантный код в локальной базе и добавляет его к запросу"""
+        if not user_text or len(user_text.strip()) < 10:
+            return user_text
+
+        db_path = os.path.join(self.mw.project_path, ".vibecoder", "vector_db")
+        if not os.path.exists(db_path):
+            return user_text
+
+        try:
+            db = VectorDatabase(self.mw.project_path)
+            if db.collection.count() == 0:
+                return user_text
+                
+            embed_provider, _ = EmbeddingFactory.get_provider("Gemini")
+            self.mw.log_system("🔍 [RAG] Векторизация вопроса и поиск по кодовой базе...", "#00838f")
+            
+            query_vector = embed_provider.get_embedding(user_text)
+            results = db.search(query_vector, n_results=3)
+            
+            if not results:
+                return user_text
+
+            rag_context = "\n\n=== СИСТЕМНЫЙ КОНТЕКСТ ПРОЕКТА (RAG) ===\n"
+            rag_context += "Ниже представлены фрагменты кода из текущего проекта, которые семантически связаны с запросом пользователя.\n"
+            rag_context += "Используй их для понимания архитектуры, но не меняй, если пользователь явно не просил.\n\n"
+            
+            for i, res in enumerate(results):
+                file_path = res['metadata'].get('file_path', 'Неизвестный файл')
+                rag_context += f"--- Файл: {file_path} (Совпадение #{i+1}) ---\n"
+                rag_context += f"```python\n{res['text']}\n```\n\n"
+
+            self.mw.log_system(f"🧠 [RAG] Найдено {len(results)} релевантных фрагментов. Контекст добавлен к запросу.", "#31a24c")
+            
+            return user_text + rag_context
+
+        except Exception as e:
+            self.mw.log_system(f"⚠️ Ошибка RAG-поиска (отправлен чистый запрос): {str(e)}", "#e6a822")
+            return user_text
+
     def send_task(self):
         import mimetypes
         user_text = self.mw.prompt_input.toPlainText().strip()
@@ -71,17 +113,7 @@ class AIController(QObject):
                     "name": os.path.basename(path)
                 })
 
-        attached_blocks = []
-        tags_in_text = re.findall(r'@\[.*?\]|@[\w\.\-\/\\]+', user_text)
-        for tag in tags_in_text:
-            fname = tag[1:].strip("[]")
-            if fname in self.mw.attached_files:
-                content = self.mw.get_file_content_safe(fname)
-                if content: 
-                    attached_blocks.append("### ФАЙЛ: " + fname + " ###\n```\n" + content + "\n```")
-        
-        final_prompt_text = user_text + ("\n\n[СИСТЕМНЫЙ БЛОК: ПРИКРЕПЛЕННЫЙ КОД]\n" + "\n\n".join(attached_blocks) + "\n[КОНЕЦ СИСТЕМНОГО БЛОКА]" if attached_blocks else "")
-        
+        # ЛОГИРОВАНИЕ В UI (Отображаем чистый запрос пользователя)
         self.mw.chat_logger.log("USER", user_text)
         
         if provider_id == "Browser":
@@ -92,6 +124,20 @@ class AIController(QObject):
         media_notice = f" <i>(+ {len(image_paths)} картинки)</i>" if image_paths else ""
         self.mw.chat_history.append(f"<br><span style='color: #569cd6;'><b>ВЫ</b> (в <i>{tab_display_name}</i>){media_notice}<b>:</b> {user_text}</span>")
         self.mw.chat_history.append(f"<a href='view_prompt:last' style='color: #65676b; font-size: 10px;'>[Показать сырой промпт]</a>")
+
+        # ОБОГАЩАЕМ ЗАПРОС ЧЕРЕЗ RAG
+        enriched_text = self._enrich_with_rag_context(user_text)
+
+        attached_blocks = []
+        tags_in_text = re.findall(r'@\[.*?\]|@[\w\.\-\/\\]+', user_text)
+        for tag in tags_in_text:
+            fname = tag[1:].strip("[]")
+            if fname in self.mw.attached_files:
+                content = self.mw.get_file_content_safe(fname)
+                if content: 
+                    attached_blocks.append("### ФАЙЛ: " + fname + " ###\n```\n" + content + "\n```")
+        
+        final_prompt_text = enriched_text + ("\n\n[СИСТЕМНЫЙ БЛОК: ПРИКРЕПЛЕННЫЙ КОД]\n" + "\n\n".join(attached_blocks) + "\n[КОНЕЦ СИСТЕМНОГО БЛОКА]" if attached_blocks else "")
             
         self.mw.last_full_prompt = self.orchestrator.format_request(
             user_prompt=final_prompt_text, 

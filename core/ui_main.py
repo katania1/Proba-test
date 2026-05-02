@@ -1,12 +1,16 @@
 import os
 import json
+from datetime import datetime
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QSplitter, 
                              QVBoxLayout, QPushButton, QMessageBox, QDialog, 
                              QStatusBar, QTabWidget, QTextBrowser, QComboBox, QLabel,
-                             QAbstractItemView, QFileDialog)
+                             QAbstractItemView, QFileDialog, QScrollArea,
+                             QProgressBar, QTableWidget, QTableWidgetItem, QHeaderView,
+                             QCheckBox, QSizePolicy) # Добавлен QCheckBox и QSizePolicy!
 from PyQt6.QtCore import Qt, QDir, QUrl, QSettings, QEvent, QTimer
 from PyQt6.QtGui import QShortcut, QKeySequence, QStandardItemModel, QStandardItem
 
+# Импорты ядра
 from core.editor import DarkPythonEditor
 from core.ai_controller import AIController
 from core.code_applier import CodeApplier
@@ -15,17 +19,23 @@ from core.file_ops import FileManager
 from core.chat_logger import ChatLogger
 from core.history_viewer import HistoryDialog
 
+# Импорты UI-модулей
 from core.custom_widgets import TagHighlighter, VibeTextEdit, VibeChatBrowser, AttachmentPanel
 from core.file_explorer import FileExplorerWidget
 from core.time_machine import TimeMachineDialog
 from core.git_manager import GitManager
 from core.api_settings_dialog import APISettingsDialog
 from core.terminal import TerminalWidget
+from core.indexer_worker import IndexerWorker
+from core.rag_dialog import RAGAnalyticsDialog
+
+
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("VibeCoder v1.19 — Terminal & Multi-Engine Edition")
+        self.setWindowTitle("VibeCoder v1.19 — Terminal, Multi-Engine & RAG Edition")
         
         self.settings = QSettings("VibeCoder", "Preferences")
         self.api_settings = QSettings("VibeCoder", "API_Config")
@@ -121,7 +131,7 @@ class MainWindow(QMainWindow):
         self.chat_logger = ChatLogger(self.project_path)
         self.git_manager = GitManager(self.project_path)
         
-        # --- ПАНЕЛИ ---
+        # --- ЛЕВАЯ ПАНЕЛЬ ---
         self.file_explorer = FileExplorerWidget(self.project_path)
         self.file_explorer.file_opened.connect(self.open_file)
         self.file_explorer.log_message.connect(self.log_system)
@@ -131,6 +141,7 @@ class MainWindow(QMainWindow):
         self.file_explorer.open_time_machine_signal.connect(self.open_time_machine)
         self.splitter.addWidget(self.file_explorer)
         
+        # --- ЦЕНТРАЛЬНАЯ ПАНЕЛЬ: Чат ---
         chat_widget = QWidget()
         chat_layout = QVBoxLayout(chat_widget)
         chat_layout.setContentsMargins(5, 5, 5, 5)
@@ -141,6 +152,9 @@ class MainWindow(QMainWindow):
         self.chat_history.setOpenLinks(False)
         self.chat_history.anchorClicked.connect(self.handle_chat_link)
         self.chat_history.setPlaceholderText("Логи системы и ответы ИИ...")
+        
+        self.chat_history.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.chat_history.customContextMenuRequested.connect(self.show_chat_context_menu)
         
         chat_font = self.settings.value("chat_font_size", 12, type=int)
         self.chat_history.set_custom_font_size(chat_font)
@@ -173,6 +187,7 @@ class MainWindow(QMainWindow):
         chat_layout.addWidget(chat_splitter)
         self.splitter.addWidget(chat_widget)
         
+        # --- ПРАВАЯ ПАНЕЛЬ: Редактор и Терминал ---
         editor_widget = QWidget()
         editor_layout = QVBoxLayout(editor_widget)
         editor_layout.setContentsMargins(5, 5, 5, 5)
@@ -195,70 +210,114 @@ class MainWindow(QMainWindow):
         self.editor_splitter.setSizes([700, 300]) 
         editor_layout.addWidget(self.editor_splitter)
         
-        bottom_btn_layout = QHBoxLayout()
+        # --- ПАНЕЛЬ КНОПОК (НОВАЯ КОМПОНОВКА) ---
+        bottom_toolbar = QWidget()
+        bottom_toolbar.setObjectName("BottomToolbar") # Для CSS
+        bottom_btn_layout = QHBoxLayout(bottom_toolbar)
+        bottom_btn_layout.setContentsMargins(0, 5, 0, 0)
         bottom_btn_layout.setSpacing(5)
         
+        # Левый блок кнопок
         self.btn_attach = QPushButton("📎")
         self.btn_attach.setToolTip("Прикрепить медиа-файл (картинку)")
         self.btn_attach.setFixedHeight(35)
-        self.btn_attach.setStyleSheet("background-color: #333333; color: white; font-size: 16px; border-radius: 4px;")
+        self.btn_attach.setStyleSheet("background-color: #333333; color: white; font-size: 16px; border-radius: 4px; padding: 0 10px;")
         self.btn_attach.clicked.connect(self.open_attachment_dialog)
         
         self.btn_send = QPushButton("➤ Отправить")
+        self.btn_send.setToolTip("Отправить запрос ИИ (Ctrl+Enter)")
         self.btn_send.setFixedHeight(35)
-        self.btn_send.setStyleSheet("background-color: #b58900; color: #1e1e1e; font-weight: bold; border-radius: 4px;")
+        self.btn_send.setStyleSheet("background-color: #b58900; color: #1e1e1e; font-weight: bold; border-radius: 4px; padding: 0 15px;")
         
         self.btn_pause = QPushButton("■ Пауза")
+        self.btn_pause.setToolTip("Приостановить работу")
         self.btn_pause.setCheckable(True)
         self.btn_pause.setFixedHeight(35)
-        self.btn_pause.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold; border-radius: 4px;")
+        self.btn_pause.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold; border-radius: 4px; padding: 0 15px;")
         self.btn_pause.clicked.connect(self.toggle_pause)
+
+        self.btn_approve = QPushButton("✅ Утвердить код")
+        self.btn_approve.setToolTip("Открыть ревью предложенного кода")
+        self.btn_approve.setFixedHeight(35)
+        self.btn_approve.setStyleSheet("background-color: #2e7d32; color: white; font-weight: bold; border-radius: 4px; padding: 0 15px;") 
+
+        self.btn_reject_main = QPushButton("❌ Отклонить")
+        self.btn_reject_main.setFixedHeight(35)
+        self.btn_reject_main.setStyleSheet("background-color: #512525; color: white; font-weight: bold; border-radius: 4px; padding: 0 15px;")
+        self.btn_reject_main.setVisible(False)
+
+        # Добавляем левый блок
+        bottom_btn_layout.addWidget(self.btn_attach)
+        bottom_btn_layout.addWidget(self.btn_send)
+        bottom_btn_layout.addWidget(self.btn_pause)
+        bottom_btn_layout.addWidget(self.btn_approve)
+        bottom_btn_layout.addWidget(self.btn_reject_main)
         
+        # ПРУЖИНА (сдвигает оставшиеся кнопки вправо)
+        bottom_btn_layout.addStretch()
+        
+        # Правый блок кнопок
         self.btn_history = QPushButton("📜")
+        self.btn_history.setToolTip("Умная история проекта и сессий")
         self.btn_history.setFixedHeight(35)
-        self.btn_history.setStyleSheet("background-color: #333333; color: white; font-size: 16px; border-radius: 4px;")
+        self.btn_history.setStyleSheet("background-color: #333333; color: white; font-size: 16px; border-radius: 4px; padding: 0 10px;")
         self.btn_history.clicked.connect(self.show_history)
         
         self.btn_relay = QPushButton("🔄")
+        self.btn_relay.setToolTip("Сформировать транзитный пакет (эстафету)")
         self.btn_relay.setFixedHeight(35)
-        self.btn_relay.setStyleSheet("background-color: #005f73; color: white; font-size: 16px; border-radius: 4px;")
+        self.btn_relay.setStyleSheet("background-color: #005f73; color: white; font-size: 16px; border-radius: 4px; padding: 0 10px;")
         
-        self.btn_terminal = QPushButton("💻 Терминал")
+        self.btn_api = QPushButton("⚙️ API")
+        self.btn_api.setToolTip("Настройки API провайдеров")
+        self.btn_api.setFixedHeight(35)
+        self.btn_api.setStyleSheet("background-color: #333333; color: white; font-weight: bold; border-radius: 4px; padding: 0 10px;")
+        self.btn_api.clicked.connect(self.open_api_settings)
+
+        # Маленькая иконка терминала
+        self.btn_terminal = QPushButton("💻")
+        self.btn_terminal.setToolTip("Открыть встроенный терминал (Ctrl+`)")
         self.btn_terminal.setCheckable(True)
-        self.btn_terminal.setFixedHeight(35)
-        self.btn_terminal.setStyleSheet("background-color: #333333; color: white; font-weight: bold; border-radius: 4px;")
+        self.btn_terminal.setFixedSize(35, 35) # Квадратная жесткая кнопка
+        self.btn_terminal.setStyleSheet("background-color: #333333; color: white; font-size: 16px; font-weight: bold; border-radius: 4px;")
         self.btn_terminal.clicked.connect(self.toggle_terminal)
         
         self.btn_git = QPushButton("📦 Git")
+        self.btn_git.setToolTip("Управление Git и GitHub")
         self.btn_git.setFixedHeight(35)
-        self.btn_git.setStyleSheet("background-color: #4a148c; color: white; font-weight: bold; border-radius: 4px;")
+        self.btn_git.setStyleSheet("background-color: #4a148c; color: white; font-weight: bold; border-radius: 4px; padding: 0 15px;")
 
-        self.btn_api = QPushButton("⚙️ API")
-        self.btn_api.setFixedHeight(35)
-        self.btn_api.setStyleSheet("background-color: #333333; color: white; font-weight: bold; border-radius: 4px;")
-        self.btn_api.clicked.connect(self.open_api_settings)
+        self.btn_rag = QPushButton("🧠 RAG (Индекс)")
+        self.btn_rag.setToolTip("Запустить семантическую индексацию проекта. ПКМ — Аналитика и автообновление.")
+        self.btn_rag.setFixedHeight(35)
+        self.btn_rag.setStyleSheet("background-color: #00838f; color: white; font-weight: bold; border-radius: 4px; padding: 0 15px;")
+        self.btn_rag.clicked.connect(self.start_rag_indexing)
+        self.btn_rag.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.btn_rag.customContextMenuRequested.connect(self.show_rag_analytics)
+
+        # Добавляем правый блок
+        bottom_btn_layout.addWidget(self.btn_history)
+        bottom_btn_layout.addWidget(self.btn_relay)
+        bottom_btn_layout.addWidget(self.btn_api)
+        bottom_btn_layout.addWidget(self.btn_terminal)
+        bottom_btn_layout.addWidget(self.btn_git)
+        bottom_btn_layout.addWidget(self.btn_rag)
         
-        self.btn_reject_main = QPushButton("❌ Отклонить")
-        self.btn_reject_main.setFixedHeight(35)
-        self.btn_reject_main.setStyleSheet("background-color: #512525; color: white; font-weight: bold; border-radius: 4px;")
-        self.btn_reject_main.setVisible(False)
+        # Оборачиваем в ScrollArea для защиты от блокировки сжатия окна
+        toolbar_scroll = QScrollArea()
+        toolbar_scroll.setWidget(bottom_toolbar)
+        toolbar_scroll.setWidgetResizable(True)
+        toolbar_scroll.setFixedHeight(45)
+        toolbar_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        toolbar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        toolbar_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Делаем ScrollArea АБСОЛЮТНО прозрачным, чтобы не было белого фона
+        toolbar_scroll.setStyleSheet("""
+            QScrollArea { background-color: transparent; border: none; }
+            QWidget#BottomToolbar { background-color: transparent; }
+        """)
         
-        self.btn_approve = QPushButton("✅ Утвердить код")
-        self.btn_approve.setFixedHeight(35)
-        self.btn_approve.setStyleSheet("background-color: #2e7d32; color: white; font-weight: bold; border-radius: 4px;") 
-        
-        bottom_btn_layout.addWidget(self.btn_attach, 1)
-        bottom_btn_layout.addWidget(self.btn_send, 2)
-        bottom_btn_layout.addWidget(self.btn_pause, 2)
-        bottom_btn_layout.addWidget(self.btn_history, 1)
-        bottom_btn_layout.addWidget(self.btn_relay, 1)
-        bottom_btn_layout.addWidget(self.btn_terminal, 2)
-        bottom_btn_layout.addWidget(self.btn_git, 2)
-        bottom_btn_layout.addWidget(self.btn_api, 1)
-        bottom_btn_layout.addWidget(self.btn_reject_main, 2)
-        bottom_btn_layout.addWidget(self.btn_approve, 2)
-        
-        editor_layout.addLayout(bottom_btn_layout)
+        editor_layout.addWidget(toolbar_scroll)
         self.splitter.addWidget(editor_widget)
         self.splitter.setSizes([220, 450, 630])
         
@@ -289,6 +348,17 @@ class MainWindow(QMainWindow):
 
         self._check_project_environment()
         self._load_recent_chat_history()
+
+    # --- КОНТЕКСТНОЕ МЕНЮ ЧАТА ---
+    def show_chat_context_menu(self, pos):
+        menu = self.chat_history.createStandardContextMenu()
+        menu.addSeparator()
+        action_clear = menu.addAction("🗑️ Очистить окно чата")
+        action = menu.exec(self.chat_history.viewport().mapToGlobal(pos))
+        
+        if action == action_clear:
+            self.chat_history.clear()
+            self.log_system("Окно чата очищено (история сохранена в базе данных).")
 
     # --- МЕТОДЫ СЕЛЕКТОРА ДВИЖКА ---
     def _add_engine_category(self, title):
@@ -352,7 +422,7 @@ class MainWindow(QMainWindow):
                     self._add_engine_category(f"--- {p_name.upper()} ---")
                     for m in c_models:
                         self._add_engine_item(m, p_id, icon="⚡")
-        except Exception as e:
+        except Exception:
             pass
 
         last_selection = self.settings.value("last_engine", "  🌐 Gemini Web")
@@ -386,11 +456,11 @@ class MainWindow(QMainWindow):
     def toggle_terminal(self):
         if self.btn_terminal.isChecked():
             self.terminal.setVisible(True)
-            self.btn_terminal.setStyleSheet("background-color: #0e639c; color: white; font-weight: bold; border-radius: 4px;")
+            self.btn_terminal.setStyleSheet("background-color: #0e639c; color: white; font-size: 16px; font-weight: bold; border-radius: 4px;")
             self.terminal.input_line.setFocus()
         else:
             self.terminal.setVisible(False)
-            self.btn_terminal.setStyleSheet("background-color: #333333; color: white; font-weight: bold; border-radius: 4px;")
+            self.btn_terminal.setStyleSheet("background-color: #333333; color: white; font-size: 16px; font-weight: bold; border-radius: 4px;")
 
     def on_tab_manually_changed(self, index):
         if index >= 0:
@@ -428,36 +498,112 @@ class MainWindow(QMainWindow):
         return super().eventFilter(obj, event)
 
     # ==========================================
+    # RAG ИНДЕКСАЦИЯ
+    # ==========================================
+    def show_rag_analytics(self, pos):
+        if not self.project_path or self.project_path == QDir.currentPath() or len(self.project_path) <= 3:
+            self.show_popup("Ошибка", "Сначала откройте или создайте рабочий проект.")
+            return
+            
+        from core.vector_db import VectorDatabase
+        try:
+            db = VectorDatabase(self.project_path)
+            dlg = RAGAnalyticsDialog(self, db, self.settings)
+            dlg.exec()
+        except Exception as e:
+            self.log_system(f"Ошибка открытия базы RAG: {e}", "#ff4444")
+
+    def start_rag_indexing(self):
+        if hasattr(self, 'indexer_worker') and self.indexer_worker.isRunning():
+            self.indexer_worker.stop()
+            self.btn_rag.setText("⏳ Остановка...")
+            self.btn_rag.setEnabled(False)
+            return
+            
+        if not self.project_path or self.project_path == QDir.currentPath() or len(self.project_path) <= 3:
+            self.show_popup("Ошибка", "Сначала выберите или создайте рабочий проект в Менеджере Проектов.", is_error=True)
+            return
+            
+        reply = self.show_question("RAG Индексация", 
+                                   "Запустить семантическую индексацию проекта?\nЭто может занять некоторое время в зависимости от размера кодовой базы.")
+        if reply == QMessageBox.StandardButton.No:
+            return
+
+        self.btn_rag.setEnabled(True)
+        self.btn_rag.setText("🛑 Стоп RAG")
+        self.btn_rag.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold; border-radius: 4px; padding: 0 15px;")
+        
+        self.indexer_worker = IndexerWorker(self.project_path, self.file_manager)
+        self.indexer_worker.progress_signal.connect(self._on_indexer_progress)
+        self.indexer_worker.log_signal.connect(self.log_system)
+        self.indexer_worker.finished_signal.connect(self._on_indexer_finished)
+        self.indexer_worker.error_signal.connect(self._on_indexer_error)
+        
+        self.indexer_worker.start()
+
+    def trigger_silent_rag_update(self):
+        """Фоновое обновление индекса только для измененных файлов"""
+        if not self.settings.value("auto_rag_update", True, type=bool):
+            return 
+
+        if hasattr(self, 'indexer_worker') and self.indexer_worker.isRunning():
+            return 
+
+        self.btn_rag.setStyleSheet("background-color: #e6a822; color: black; font-weight: bold; border-radius: 4px; padding: 0 15px;")
+        self.btn_rag.setText("⏳ RAG...")
+        
+        self.indexer_worker = IndexerWorker(self.project_path, self.file_manager, silent=True)
+        self.indexer_worker.finished_signal.connect(self._on_silent_rag_finished)
+        self.indexer_worker.start()
+
+    def _on_silent_rag_finished(self):
+        self.btn_rag.setText("🧠 RAG (Индекс)")
+        self.btn_rag.setStyleSheet("background-color: #00838f; color: white; font-weight: bold; border-radius: 4px; padding: 0 15px;")
+
+    def _on_indexer_progress(self, current, total, filename):
+        self.status_bar.showMessage(f"🔄 Индексация (RAG): {current}/{total} | Файл: {filename}")
+
+    def _on_indexer_finished(self):
+        self.btn_rag.setEnabled(True)
+        self.btn_rag.setText("🧠 RAG (Индекс)")
+        self.btn_rag.setStyleSheet("background-color: #00838f; color: white; font-weight: bold; border-radius: 4px; padding: 0 15px;")
+        self.update_status_bar() 
+        self.show_popup("Готово", "Индексация проекта успешно завершена (или остановлена)!\nТеперь ИИ 'знает' вашу кодовую базу.")
+
+    def _on_indexer_error(self, err_msg):
+        self.btn_rag.setEnabled(True)
+        self.btn_rag.setText("🧠 RAG (Индекс)")
+        self.btn_rag.setStyleSheet("background-color: #00838f; color: white; font-weight: bold; border-radius: 4px; padding: 0 15px;")
+        self.update_status_bar()
+        self.show_popup("Ошибка индексации", f"Произошла ошибка при векторизации:\n{err_msg}", is_error=True)
+        self.log_system(f"Ошибка RAG: {err_msg}", "#ff4444")
+
+    # ==========================================
     # УПРАВЛЕНИЕ ПРОЕКТАМИ И СРЕДОЙ (DR / GIT)
     # ==========================================
     def handle_project_changed(self, new_path):
         self.project_path = new_path
         self.settings.setValue("last_project_path", new_path)
         
-        # Обновляем менеджеры
         self.file_manager = FileManager(new_path)
         self.chat_logger = ChatLogger(new_path)
         self.git_manager = GitManager(new_path)
         self.prompt_input.project_path = new_path
         self.terminal.update_project_path(new_path)
         
-        # Очистка UI редактора
         self.current_file_path = None
         self.editor.setText("")
         self.editor_tabs.setTabText(0, "Ничего не открыто")
         
-        # Сброс кэша ревью
         self.memory_old_code = None
         self.proposed_updates = []
         self.btn_reject_main.setVisible(False)
         self.btn_approve.setText("✅ Утвердить код")
         
-        # Очистка прикрепленных файлов (Сброс контекста ИИ)
         self.attached_files.clear()
         self.prompt_input.highlighter.rehighlight()
         self.attachment_panel.clear()
         
-        # Очистка чата
         self.chat_history.clear()
         self.log_system(f"Проект успешно загружен: {os.path.basename(new_path)}")
         
@@ -467,15 +613,12 @@ class MainWindow(QMainWindow):
     def _check_project_environment(self):
         self.update_git_status()
         
-        # Не терроризируем пользователя Git-запросами, если он открыл системную папку
         if self.project_path == QDir.currentPath() or len(self.project_path) <= 3:
             return
             
-        # 1. Проверка Git (Авто-инициализация)
         if not self.git_manager.is_repo():
-            reply = QMessageBox.question(self, "Система контроля версий", 
-                                         "В этом проекте нет Git-репозитория.\nИнициализировать его прямо сейчас?",
-                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            reply = self.show_question("Система контроля версий", 
+                                       "В этом проекте нет Git-репозитория.\nИнициализировать его прямо сейчас?")
             if reply == QMessageBox.StandardButton.Yes:
                 success, msg = self.git_manager.init_repo()
                 if success:
@@ -484,13 +627,11 @@ class MainWindow(QMainWindow):
                 else:
                     self.show_popup("Ошибка", f"Не удалось инициализировать Git:\n{msg}", is_error=True)
                     
-        # 2. Проверка venv (Disaster Recovery)
         venv_path = os.path.join(self.project_path, 'venv')
         req_path = os.path.join(self.project_path, 'requirements.txt')
         if not os.path.exists(venv_path) and os.path.exists(req_path):
-            reply = QMessageBox.question(self, "Восстановление среды", 
-                                         "Виртуальное окружение (venv) не найдено, но есть requirements.txt.\nВосстановить среду (создать venv и установить пакеты)?",
-                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            reply = self.show_question("Восстановление среды", 
+                                       "Виртуальное окружение (venv) не найдено, но есть requirements.txt.\nВосстановить среду (создать venv и установить пакеты)?")
             if reply == QMessageBox.StandardButton.Yes:
                 if not self.btn_terminal.isChecked():
                     self.btn_terminal.click() 
@@ -505,15 +646,12 @@ class MainWindow(QMainWindow):
                 self.terminal.execute_cmd("pip install -r requirements.txt")
 
     def _load_recent_chat_history(self):
-        """Подгружает последние сообщения из базы логов для сохранения визуального контекста"""
         logs = self.chat_logger.get_all()
         if logs:
             self.chat_history.append("<br><span style='color: #888888;'><i>--- История предыдущей сессии (последние 20 сообщений) ---</i></span>")
             for log in logs[-20:]:
                 role = log.get("role", "")
                 content = log.get("content", "")
-                
-                # Защита от HTML тегов, чтобы не ломать верстку окна
                 safe_content = content.replace('<', '&lt;').replace('>', '&gt;').replace('\n', '<br>')
                 
                 if role == "USER":
@@ -527,7 +665,7 @@ class MainWindow(QMainWindow):
             self.scroll_chat()
 
     # ==========================================
-    # ПРОЧИЕ ОБРАБОТЧИКИ
+    # ПРОЧИЕ ОБРАБОТЧИКИ И ДИАЛОГИ
     # ==========================================
     def handle_tree_tags(self, files, is_attach):
         formatted_files = [f"@[{f}]" for f in files]
@@ -598,6 +736,35 @@ class MainWindow(QMainWindow):
         msg.setStyleSheet("QMessageBox { background-color: #252526; color: #d4d4d4; } QLabel { color: #d4d4d4; font-size: 13px; } QPushButton { background-color: #0e639c; color: white; padding: 6px 20px; border-radius: 4px; font-weight: bold; } QPushButton:hover { background-color: #1177bb; }")
         msg.exec()
 
+    def show_question(self, title, message):
+        """Собственное диалоговое окно для защиты от белой темы Windows"""
+        dlg = QDialog(self)
+        dlg.setWindowTitle(title)
+        dlg.resize(400, 150)
+        dlg.setStyleSheet("background-color: #1e1e1e; color: #d4d4d4;")
+        layout = QVBoxLayout(dlg)
+        
+        lbl = QLabel(message)
+        lbl.setWordWrap(True)
+        lbl.setStyleSheet("font-size: 13px; margin: 10px;")
+        layout.addWidget(lbl)
+        
+        btn_layout = QHBoxLayout()
+        btn_yes = QPushButton("Да")
+        btn_yes.setStyleSheet("background-color: #0e639c; color: white; padding: 6px 20px; border-radius: 4px; font-weight: bold;")
+        btn_yes.clicked.connect(lambda: dlg.done(QMessageBox.StandardButton.Yes))
+        
+        btn_no = QPushButton("Нет")
+        btn_no.setStyleSheet("background-color: #333333; color: white; padding: 6px 20px; border-radius: 4px; font-weight: bold;")
+        btn_no.clicked.connect(lambda: dlg.done(QMessageBox.StandardButton.No))
+        
+        btn_layout.addStretch()
+        btn_layout.addWidget(btn_yes)
+        btn_layout.addWidget(btn_no)
+        layout.addLayout(btn_layout)
+        
+        return dlg.exec()
+
     def update_status_bar(self):
         total = self.tokens_sent + self.tokens_received
         self.status_bar.showMessage(f"🟢 Текущая сессия: ~{total:,} токенов | ⬆️ Отправлено: ~{self.tokens_sent:,} | ⬇️ Получено: ~{self.tokens_received:,}")
@@ -606,12 +773,12 @@ class MainWindow(QMainWindow):
         if self.btn_pause.isChecked():
             self.ai_controller.bridge.is_paused = True
             self.btn_pause.setText("▶ Продолжить")
-            self.btn_pause.setStyleSheet("background-color: #31a24c; color: white; font-weight: bold; border-radius: 4px;")
+            self.btn_pause.setStyleSheet("background-color: #31a24c; color: white; font-weight: bold; border-radius: 4px; padding: 0 15px;")
             self.log_system("⏸ РАБОТА ПРИОСТАНОВЛЕНА", color="#ffaa00")
         else:
             self.ai_controller.bridge.is_paused = False
             self.btn_pause.setText("■ Пауза")
-            self.btn_pause.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold; border-radius: 4px;")
+            self.btn_pause.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold; border-radius: 4px; padding: 0 15px;")
             self.log_system("▶ РАБОТА ВОЗОБНОВЛЕНА", color="#31a24c")
 
     def show_history(self):
