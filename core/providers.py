@@ -18,7 +18,7 @@ class AbstractProvider(ABC):
 
     @abstractmethod
     def verify_model(self, model: str) -> tuple[bool, str]:
-        """Делает микро-запрос (1 токен) для проверки реального доступа к модели (баланс/лимиты). Возвращает (Успех, Сообщение)."""
+        """Делает микро-запрос для проверки реального доступа к модели (баланс/лимиты)."""
         pass
 
 class OpenAIProvider(AbstractProvider):
@@ -54,7 +54,7 @@ class OpenAIProvider(AbstractProvider):
         response.raise_for_status()
         
         data = response.json()
-        models = [m["id"] for m in data.get("data", []) if m["id"].startswith("gpt-")]
+        models = [m["id"] for m in data.get("data", [])]
         return sorted(models, reverse=True)
 
     def verify_model(self, model: str) -> tuple[bool, str]:
@@ -62,11 +62,14 @@ class OpenAIProvider(AbstractProvider):
             self.base_url = "https://api.openai.com/v1"
         url = f"{self.base_url.rstrip('/')}/chat/completions"
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        
+        # Попытка 1: С классическим ограничением (спасает от ошибки баланса в OpenRouter)
         data = {
             "model": model or "gpt-4o",
             "messages": [{"role": "user", "content": "ping"}],
-            "max_tokens": 1 # Тратим минимум ресурсов
+            "max_tokens": 15
         }
+        
         try:
             res = requests.post(url, headers=headers, json=data, timeout=15)
             res.raise_for_status()
@@ -75,8 +78,19 @@ class OpenAIProvider(AbstractProvider):
             err_msg = str(e)
             if hasattr(e, 'response') and e.response is not None:
                 try:
-                    err_msg = e.response.json().get("error", {}).get("message", err_msg)
-                except ValueError:
+                    error_data = e.response.json().get("error", {})
+                    err_msg = error_data.get("message", err_msg)
+                    
+                    # Попытка 2: Если это o1-подобная модель, требующая max_completion_tokens
+                    if "max_tokens" in err_msg and "max_completion_tokens" in err_msg:
+                        data.pop("max_tokens")
+                        data["max_completion_tokens"] = 15
+                        
+                        res2 = requests.post(url, headers=headers, json=data, timeout=15)
+                        res2.raise_for_status()
+                        return True, "Доступ подтвержден! (Использован max_completion_tokens)"
+                        
+                except Exception:
                     pass
             return False, f"Ошибка доступа: {err_msg}"
 
@@ -126,7 +140,7 @@ class AnthropicProvider(AbstractProvider):
         headers = {"x-api-key": self.api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"}
         data = {
             "model": model or "claude-3-5-sonnet-20241022",
-            "max_tokens": 1,
+            "max_tokens": 15,
             "messages": [{"role": "user", "content": "ping"}]
         }
         try:
@@ -178,17 +192,11 @@ class GeminiAPIProvider(AbstractProvider):
         return sorted(models, reverse=True)
 
     def verify_model(self, model: str) -> tuple[bool, str]:
-        if not self.base_url:
-            self.base_url = "https://api.openai.com/v1"
-        url = f"{self.base_url.rstrip('/')}/chat/completions"
-        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
-        
-        # Убираем max_tokens, чтобы не конфликтовать с новыми моделями o1/o3
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={self.api_key}"
+        headers = {"Content-Type": "application/json"}
         data = {
-            "model": model or "gpt-4o",
-            "messages": [{"role": "user", "content": "ping"}]
+            "contents": [{"parts": [{"text": "ping"}]}],
         }
-        
         try:
             res = requests.post(url, headers=headers, json=data, timeout=15)
             res.raise_for_status()

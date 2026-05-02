@@ -1,4 +1,5 @@
 import os
+import json
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QSplitter, 
                              QVBoxLayout, QPushButton, QMessageBox, QDialog, 
                              QStatusBar, QTabWidget, QTextBrowser, QComboBox, QLabel,
@@ -84,17 +85,13 @@ class MainWindow(QMainWindow):
         """)
         self.combo_engine.setMinimumWidth(220)
         
-        # Создаем кастомную модель для ComboBox (чтобы делать заголовки некликабельными)
         self.engine_model = QStandardItemModel()
         self.combo_engine.setModel(self.engine_model)
         
         status_layout.addWidget(lbl_engine)
         status_layout.addWidget(self.combo_engine)
         
-        # Обновляем список движков при старте
         self.refresh_engine_list()
-        
-        # Сохраняем выбор пользователя
         self.combo_engine.currentTextChanged.connect(self._save_engine_selection)
         
         # ----------------------------------------
@@ -284,51 +281,73 @@ class MainWindow(QMainWindow):
 
     # --- МЕТОДЫ СЕЛЕКТОРА ДВИЖКА ---
     def _add_engine_category(self, title):
-        """Добавляет некликабельный заголовок-категорию"""
         item = QStandardItem(title)
         item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable & ~Qt.ItemFlag.ItemIsEnabled)
         item.setData(title, Qt.ItemDataRole.DisplayRole)
-        # Делаем заголовок серым и центруем
         item.setForeground(Qt.GlobalColor.darkGray)
         item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         self.engine_model.appendRow(item)
 
-    def _add_engine_item(self, text, icon=""):
-        """Добавляет кликабельную модель"""
+    def _add_engine_item(self, text, provider_id, icon=""):
         item = QStandardItem(f"  {icon} {text}" if icon else f"  {text}")
-        # Сохраняем "чистое" имя модели в UserRole для удобного извлечения
-        item.setData(text, Qt.ItemDataRole.UserRole)
+        # Скрыто сохраняем ID провайдера и чистую модель для AIController
+        item.setData({"provider_id": provider_id, "model": text}, Qt.ItemDataRole.UserRole)
         self.engine_model.appendRow(item)
 
+    def get_selected_engine_data(self):
+        """Возвращает скрытые данные текущего выбранного движка"""
+        index = self.combo_engine.currentIndex()
+        if index >= 0:
+            item = self.engine_model.item(index)
+            if item:
+                data = item.data(Qt.ItemDataRole.UserRole)
+                if data: return data
+        return {"provider_id": "Browser", "model": "Gemini Web"}
+
     def refresh_engine_list(self):
-        """Перестраивает выпадающий список движков, читая рабочие модели из QSettings"""
         self.combo_engine.blockSignals(True)
         self.engine_model.clear()
         
-        # 1. Браузер (Всегда доступен)
+        # 1. Браузер
         self._add_engine_category("--- БРАУЗЕР (ВКЛАДКИ) ---")
-        self._add_engine_item("Gemini Web", icon="🌐")
+        self._add_engine_item("Gemini Web", "Browser", icon="🌐")
         
-        # 2. OpenAI
-        oai_models = self.api_settings.value("openai_verified", [])
+        # 2. Базовые API
+        oai_models = self.api_settings.value("OpenAI_verified", [])
+        if isinstance(oai_models, str): oai_models = [oai_models]
         if oai_models:
             self._add_engine_category("--- OPENAI API ---")
-            for m in oai_models:
-                self._add_engine_item(m, icon="🟢")
+            for m in oai_models: self._add_engine_item(m, "OpenAI", icon="🟢")
                 
-        # 3. Anthropic
-        ant_models = self.api_settings.value("anthropic_verified", [])
+        ant_models = self.api_settings.value("Anthropic_verified", [])
+        if isinstance(ant_models, str): ant_models = [ant_models]
         if ant_models:
             self._add_engine_category("--- ANTHROPIC API ---")
-            for m in ant_models:
-                self._add_engine_item(m, icon="🟣")
+            for m in ant_models: self._add_engine_item(m, "Anthropic", icon="🟣")
                 
-        # 4. Gemini API
-        gem_models = self.api_settings.value("gemini_verified", [])
+        gem_models = self.api_settings.value("Gemini_verified", [])
+        if isinstance(gem_models, str): gem_models = [gem_models]
         if gem_models:
             self._add_engine_category("--- GEMINI API ---")
-            for m in gem_models:
-                self._add_engine_item(m, icon="🤖")
+            for m in gem_models: self._add_engine_item(m, "Gemini", icon="🤖")
+
+        # 3. Кастомные провайдеры (Groq, OpenRouter, и т.д.)
+        custom_data = self.api_settings.value("custom_providers", "[]")
+        try:
+            custom_providers = json.loads(custom_data)
+            for p in custom_providers:
+                p_id = p['id']
+                p_name = p['name']
+                
+                c_models = self.api_settings.value(f"{p_id}_verified", [])
+                if isinstance(c_models, str): c_models = [c_models]
+                
+                if c_models:
+                    self._add_engine_category(f"--- {p_name.upper()} ---")
+                    for m in c_models:
+                        self._add_engine_item(m, p_id, icon="⚡")
+        except Exception as e:
+            print(f"Ошибка парсинга кастомных провайдеров: {e}")
 
         # Восстанавливаем последний выбор
         last_selection = self.settings.value("last_engine", "  🌐 Gemini Web")
@@ -336,17 +355,14 @@ class MainWindow(QMainWindow):
         if index >= 0:
             self.combo_engine.setCurrentIndex(index)
         else:
-            # Если последней модели больше нет (например, её удалили из API), выбираем Браузер
-            self.combo_engine.setCurrentIndex(1) # Индекс 1, т.к. 0 это заголовок
+            self.combo_engine.setCurrentIndex(1) 
             
         self.combo_engine.blockSignals(False)
 
     def _save_engine_selection(self, text):
-        """Сохраняет выбор при смене движка в комбобоксе"""
         self.settings.setValue("last_engine", text)
 
     def open_api_settings(self):
-        """Открывает настройки и обновляет список движков при закрытии"""
         dialog = APISettingsDialog(self)
         if dialog.exec():
             self.refresh_engine_list()
