@@ -1,4 +1,5 @@
 import os
+import re
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QSplitter, 
                              QVBoxLayout, QDialog, QTabWidget, QTextBrowser, 
                              QLabel, QFileDialog, QPushButton, QMessageBox)
@@ -72,7 +73,6 @@ class MainWindow(QMainWindow):
         if not os.path.exists(self.project_path):
             self.project_path = QDir.currentPath()
         
-        # --- СТАТУС-БАР ---
         self.status_bar = VibeStatusBar(self)
         self.setStatusBar(self.status_bar)
         
@@ -84,7 +84,6 @@ class MainWindow(QMainWindow):
         self.chat_logger = ChatLogger(self.project_path)
         self.git_manager = GitManager(self.project_path)
         
-        # --- ЛЕВАЯ ПАНЕЛЬ ---
         self.file_explorer = FileExplorerWidget(self.project_path)
         self.file_explorer.file_opened.connect(self.open_file)
         self.file_explorer.log_message.connect(self.log_system)
@@ -94,7 +93,6 @@ class MainWindow(QMainWindow):
         self.file_explorer.open_time_machine_signal.connect(self.open_time_machine)
         self.splitter.addWidget(self.file_explorer)
         
-        # --- ЦЕНТРАЛЬНАЯ ПАНЕЛЬ: Чат ---
         chat_widget = QWidget()
         chat_layout = QVBoxLayout(chat_widget)
         chat_layout.setContentsMargins(5, 5, 5, 5)
@@ -114,7 +112,6 @@ class MainWindow(QMainWindow):
         
         chat_splitter.addWidget(self.chat_history)
 
-        # --- ОБНОВЛЕННЫЙ БЛОК ВВОДА С КНОПКАМИ ---
         input_container = QWidget()
         input_container.setStyleSheet("background-color: #252526; border: 1px solid #3c3c3c; border-radius: 4px;")
         input_layout = QVBoxLayout(input_container)
@@ -138,11 +135,8 @@ class MainWindow(QMainWindow):
         input_layout.addWidget(self.prompt_input)
         input_layout.addWidget(self.attachment_panel) 
 
-        # -- БЛОК КНОПОК ДЕЙСТВИЙ (ЦЕЛЕВЫЕ КНОПКИ ВНИЗУ ПОЛЯ ВВОДА) --
         action_layout = QHBoxLayout()
         action_layout.setContentsMargins(5, 0, 5, 5)
-        
-        # ДОБАВЛЯЕМ ПРУЖИНУ СЛЕВА! Теперь кнопки прилипнут к правому краю
         action_layout.addStretch() 
         
         btn_action_style = "color: white; font-weight: bold; border-radius: 3px; padding: 2px 10px; font-size: 11px; margin-left: 5px;"
@@ -171,14 +165,12 @@ class MainWindow(QMainWindow):
         action_layout.addWidget(self.btn_reject_main)
 
         input_layout.addLayout(action_layout)
-        # ----------------------------------------------------
         
         chat_splitter.addWidget(input_container)
         chat_splitter.setSizes([600, 200])
         chat_layout.addWidget(chat_splitter)
         self.splitter.addWidget(chat_widget)
         
-        # --- ПРАВАЯ ПАНЕЛЬ: Редактор и Терминал ---
         editor_widget = QWidget()
         editor_layout = QVBoxLayout(editor_widget)
         editor_layout.setContentsMargins(5, 5, 5, 5)
@@ -196,19 +188,18 @@ class MainWindow(QMainWindow):
         
         self.terminal = TerminalWidget(self.project_path)
         self.terminal.setVisible(False) 
-        self.editor_splitter.addWidget(self.terminal)
+        self.terminal.ai_fix_requested.connect(self.handle_terminal_error)
         
+        self.editor_splitter.addWidget(self.terminal)
         self.editor_splitter.setSizes([700, 300]) 
         editor_layout.addWidget(self.editor_splitter)
         
-        # --- ВОЗВРАЩАЕМ ПАНЕЛЬ ПОД РЕДАКТОР ---
         self.bottom_panel = BottomPanelWidget()
         editor_layout.addWidget(self.bottom_panel)
 
         self.splitter.addWidget(editor_widget)
         self.splitter.setSizes([220, 450, 630])
 
-        # --- СВЯЗЫВАНИЕ АЛИАСОВ ---
         self.btn_attach = self.bottom_panel.btn_attach
         self.btn_history = self.bottom_panel.btn_history
         self.btn_relay = self.bottom_panel.btn_relay
@@ -217,7 +208,6 @@ class MainWindow(QMainWindow):
         self.btn_rag = self.bottom_panel.btn_rag
         self.btn_terminal = self.status_bar.btn_terminal
         
-        # --- RAG КОНТРОЛЛЕР ---
         self.rag_controller = RagController(self)
 
         self.current_file_path = None
@@ -238,7 +228,6 @@ class MainWindow(QMainWindow):
         self.btn_reject_main.clicked.connect(self.code_applier.reject_preview)
         self.btn_git.clicked.connect(self.git_workflow.open_git_dialog)
         
-        # --- ПОДКЛЮЧЕНИЕ СИГНАЛОВ КНОПОК ---
         self.btn_attach.clicked.connect(self.open_attachment_dialog)
         self.btn_pause.clicked.connect(self.toggle_pause)
         self.btn_history.clicked.connect(self.show_history)
@@ -259,9 +248,6 @@ class MainWindow(QMainWindow):
         self._load_recent_chat_history()
 
 
-    # ==========================================
-    # ПРОСТЫЕ МЕТОДЫ (ОСТАВЛЕНЫ В MAIN_WINDOW)
-    # ==========================================
     def get_selected_engine_data(self):
         return self.status_bar.get_selected_engine_data()
         
@@ -523,3 +509,47 @@ class MainWindow(QMainWindow):
     def scroll_chat(self):
         scrollbar = self.chat_history.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
+
+    # --- ФАЗА 23.5: АВТО-ПРИКРЕПЛЕНИЕ И АВТО-ОТПРАВКА ---
+    def handle_terminal_error(self, error_text):
+        """Парсит Traceback, прикрепляет сломанный файл и сразу отправляет задачу ИИ"""
+        
+        # 1. Ищем пути к файлам в тексте ошибки (регулярное выражение)
+        file_paths = re.findall(r'File "(.*?)", line', error_text)
+        
+        culprit_file = None
+        # Идем по списку с конца, так как сама причина ошибки обычно внизу Traceback
+        for path in reversed(file_paths):
+            norm_path = os.path.normpath(path)
+            # Проверяем, принадлежит ли файл нашему проекту (отсеиваем системные либы Python)
+            if norm_path.startswith(os.path.normpath(self.project_path)):
+                culprit_file = norm_path
+                break
+                
+        # 2. Формируем текст промпта
+        fix_prompt = (
+            f"В моем коде произошла ошибка во время выполнения. "
+            f"Проанализируй этот Traceback, определи проблемный файл и причину.\n\n"
+            f"Лог терминала:\n"
+            f"```\n{error_text}\n```\n\n"
+            f"Пришли мне JSON с командой поиска и замены (search/replace) для ее исправления."
+        )
+        self.prompt_input.setPlainText(fix_prompt)
+        
+        # 3. АВТОМАТИЧЕСКИ ПРИКРЕПЛЯЕМ ФАЙЛ
+        if culprit_file:
+            # Превращаем абсолютный путь в относительный для красивого отображения
+            rel_path = os.path.relpath(culprit_file, self.project_path)
+            
+            # Добавляем файл в память интерфейса, как если бы юзер сделал ПКМ -> Прикрепить
+            self.attached_files.add(rel_path)
+            self.attachment_panel.add_attachment(culprit_file)
+            self.prompt_input.highlighter.rehighlight()
+            
+            self.log_system(f"🩺 Терминал поймал ошибку! Файл {rel_path} прикреплен автоматически.", color="#d32f2f")
+        else:
+            self.log_system("🩺 Терминал поймал ошибку, но файл не найден. Промпт сформирован.", color="#d32f2f")
+
+        # 4. МАГИЯ: АВТО-ОТПРАВКА!
+        # Эмулируем нажатие кнопки отправки, чтобы всё произошло в один клик
+        self.btn_send.click()

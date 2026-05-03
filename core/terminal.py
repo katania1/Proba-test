@@ -1,16 +1,25 @@
 import os
 import re
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QTextBrowser, QLineEdit
-from PyQt6.QtCore import QProcess, Qt
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QTextBrowser, QLineEdit, QPushButton
+from PyQt6.QtCore import QProcess, Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QTextCursor
 
 class TerminalWidget(QWidget):
+    # Сигнал для передачи собранной ошибки наверх, в главное окно
+    ai_fix_requested = pyqtSignal(str)
+
     def __init__(self, project_path):
         super().__init__()
         self.project_path = project_path
         self.process = QProcess(self)
         self.command_history = []
         self.history_idx = 0
+        
+        # Переменные для перехвата ошибок (Фаза 23)
+        self.error_buffer = ""
+        self.error_timer = QTimer()
+        self.error_timer.setSingleShot(True)
+        self.error_timer.timeout.connect(self._process_collected_error)
         
         self.init_ui()
         self.init_process()
@@ -31,6 +40,19 @@ class TerminalWidget(QWidget):
             border-bottom: none;
         """)
         
+        # Кнопка авто-лечения (по умолчанию скрыта)
+        self.btn_fix_error = QPushButton("🩺 Поручить ИИ исправить ошибку")
+        self.btn_fix_error.setStyleSheet("""
+            background-color: #d32f2f;
+            color: white;
+            font-weight: bold;
+            padding: 8px;
+            border-radius: 4px;
+            margin: 5px;
+        """)
+        self.btn_fix_error.setVisible(False)
+        self.btn_fix_error.clicked.connect(self._trigger_ai_fix)
+        
         # Строка ввода команд
         self.input_line = QLineEdit()
         self.input_line.setStyleSheet("""
@@ -47,6 +69,7 @@ class TerminalWidget(QWidget):
         self.input_line.installEventFilter(self)
 
         layout.addWidget(self.output_area)
+        layout.addWidget(self.btn_fix_error)
         layout.addWidget(self.input_line)
 
     def init_process(self):
@@ -55,17 +78,12 @@ class TerminalWidget(QWidget):
         self.process.readyReadStandardOutput.connect(self.read_output)
         self.process.readyReadStandardError.connect(self.read_error)
         
-        # Запускаем консоль Windows
         if os.name == 'nt':
             self.process.start('cmd.exe')
-            
-            # АВТОМАТИЗАЦИЯ: Ищем venv и активируем его невидимо для пользователя
-            # ИСПОЛЬЗУЕМ normpath, ЧТОБЫ ИЗБЕЖАТЬ СМЕСИ / И \ В ПУТЯХ WINDOWS
             venv_path = os.path.normpath(os.path.join(self.project_path, 'venv', 'Scripts', 'activate.bat'))
             if os.path.exists(venv_path):
                 self.execute_cmd(f'"{venv_path}"')
         else:
-            # Для Linux/Mac (на будущее)
             self.process.start('/bin/bash')
             venv_path = os.path.join(self.project_path, 'venv', 'bin', 'activate')
             if os.path.exists(venv_path):
@@ -76,7 +94,6 @@ class TerminalWidget(QWidget):
         if self.process.state() == QProcess.ProcessState.Running:
             if os.name == 'nt':
                 try:
-                    # Windows cmd ожидает кириллицу в CP866, а не в UTF-8
                     encoded_cmd = (cmd + '\n').encode('cp866')
                 except UnicodeEncodeError:
                     encoded_cmd = (cmd + '\n').encode('utf-8')
@@ -92,11 +109,12 @@ class TerminalWidget(QWidget):
             self.command_history.append(cmd)
             self.history_idx = len(self.command_history)
             
-            # Отображаем саму команду в логах (зеленым), чтобы понимать, что мы ввели
             self.append_text(f'\n<span style="color: #31a24c; font-weight: bold;">> {cmd}</span>\n', is_html=True)
-            
             self.execute_cmd(cmd)
             self.input_line.clear()
+            
+            # При ручном вводе новой команды прячем кнопку лечения
+            self.btn_fix_error.setVisible(False)
 
     def eventFilter(self, obj, event):
         """Перехватывает нажатия кнопок для истории команд (Вверх/Вниз)"""
@@ -117,7 +135,7 @@ class TerminalWidget(QWidget):
         return super().eventFilter(obj, event)
 
     def strip_ansi(self, text):
-        """Удаляет цветовые ANSI-коды, чтобы не было 'мусора' в тексте"""
+        """Удаляет цветовые ANSI-коды"""
         ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
         return ansi_escape.sub('', text)
 
@@ -125,15 +143,20 @@ class TerminalWidget(QWidget):
         """Читает стандартный вывод (успешные команды)"""
         data = self.process.readAllStandardOutput().data()
         try:
-            text = data.decode('cp866') # Родная кодировка cmd в русской Windows
+            text = data.decode('cp866') 
         except UnicodeDecodeError:
             text = data.decode('utf-8', errors='replace')
         
         clean_text = self.strip_ansi(text)
         self.append_text(clean_text)
+        
+        # Если таймер активен, значит ошибка могла просочиться в обычный вывод
+        if self.error_timer.isActive():
+            self.error_buffer += clean_text
+            self.error_timer.start(500) # Продлеваем ожидание конца ошибки
 
     def read_error(self):
-        """Читает вывод ошибок"""
+        """Читает вывод ошибок и парсит Traceback"""
         data = self.process.readAllStandardError().data()
         try:
             text = data.decode('cp866')
@@ -142,9 +165,30 @@ class TerminalWidget(QWidget):
             
         clean_text = self.strip_ansi(text)
         self.append_text(f'<span style="color: #ff4444;">{clean_text}</span>', is_html=True)
+        
+        # АГЕНТНЫЙ ПЕРЕХВАТ: Ищем начало падения скрипта
+        if "Traceback" in clean_text or "SyntaxError" in clean_text or "Exception" in clean_text:
+            if not self.error_timer.isActive():
+                self.error_buffer = "" # Начинаем собирать новую ошибку
+            self.error_buffer += clean_text
+            self.error_timer.start(500) # Ждем 500мс следующих строк
+        elif self.error_timer.isActive():
+            self.error_buffer += clean_text
+            self.error_timer.start(500)
+
+    def _process_collected_error(self):
+        """Срабатывает, когда поток красного текста прекратился на 500мс"""
+        if "Traceback" in self.error_buffer or "SyntaxError" in self.error_buffer:
+            self.btn_fix_error.setVisible(True)
+
+    def _trigger_ai_fix(self):
+        """Пользователь нажал кнопку лечения"""
+        self.btn_fix_error.setVisible(False)
+        self.ai_fix_requested.emit(self.error_buffer)
+        self.error_buffer = "" # Очищаем буфер
 
     def append_text(self, text, is_html=False):
-        """Прокручивает окно вниз и безопасно добавляет текст"""
+        """Безопасно добавляет текст в конец логов"""
         cursor = self.output_area.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
         self.output_area.setTextCursor(cursor)
