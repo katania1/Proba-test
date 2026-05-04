@@ -14,6 +14,7 @@ from core.git_workflow import GitWorkflow
 from core.file_ops import FileManager
 from core.chat_logger import ChatLogger
 from core.history_viewer import HistoryDialog
+from core.inspector_dialog import InspectorDialog
 
 # Импорты UI-модулей
 from core.custom_widgets import TagHighlighter, VibeTextEdit, VibeChatBrowser, AttachmentPanel
@@ -23,7 +24,6 @@ from core.git_manager import GitManager
 from core.api_settings_dialog import APISettingsDialog
 from core.terminal import TerminalWidget
 
-# НОВЫЕ ИМПОРТЫ НАШЕЙ ОПТИМИЗАЦИИ
 from core.rag_controller import RagController
 from core.status_bar import VibeStatusBar
 from core.bottom_panel import BottomPanelWidget
@@ -141,6 +141,12 @@ class MainWindow(QMainWindow):
         
         btn_action_style = "color: white; font-weight: bold; border-radius: 3px; padding: 2px 10px; font-size: 11px; margin-left: 5px;"
 
+        # --- НОВАЯ КНОПКА ИНСПЕКТОРА ---
+        self.btn_inspector = QPushButton("🐞 Инспектор")
+        self.btn_inspector.setFixedHeight(24)
+        self.btn_inspector.setStyleSheet(f"background-color: #005f73; {btn_action_style}")
+        self.btn_inspector.clicked.connect(self.open_inspector)
+
         self.btn_send = QPushButton("➤ Отправить")
         self.btn_send.setFixedHeight(24)
         self.btn_send.setStyleSheet(f"background-color: #b58900; color: #1e1e1e; {btn_action_style.replace('color: white;', '')}")
@@ -159,6 +165,7 @@ class MainWindow(QMainWindow):
         self.btn_reject_main.setStyleSheet(f"background-color: #512525; {btn_action_style}")
         self.btn_reject_main.setVisible(False)
         
+        action_layout.addWidget(self.btn_inspector) # Добавили кнопку в интерфейс
         action_layout.addWidget(self.btn_send)
         action_layout.addWidget(self.btn_pause)
         action_layout.addWidget(self.btn_approve)
@@ -239,6 +246,11 @@ class MainWindow(QMainWindow):
 
         self.ai_controller = AIController(self)
         self.ai_controller.start()
+        
+        self.bottom_panel.update_mcp_status(
+            self.ai_controller.mcp_manager.status, 
+            self.ai_controller.mcp_manager.error_message
+        )
         
         self.btn_send.clicked.connect(self.ai_controller.send_task)
         self.prompt_input.send_signal.connect(self.ai_controller.send_task)
@@ -348,7 +360,7 @@ class MainWindow(QMainWindow):
             if reply == QMessageBox.StandardButton.Yes:
                 success, msg = self.git_manager.init_repo()
                 if success:
-                    self.log_system("Git репозиторий инициализирован!", color="#31a24c")
+                    self.log_system("Git репозиторий инициализирован!", color="#31a24c", is_bold=True)
                     self.update_git_status()
                 else: self.show_popup("Ошибка", f"Не удалось инициализировать Git:\n{msg}", is_error=True)
                     
@@ -378,7 +390,7 @@ class MainWindow(QMainWindow):
                 
                 if role == "USER": self.chat_history.append(f"<br><span style='color: #569cd6;'><b>ВЫ:</b> {safe_content}</span>")
                 elif role == "AI": self.chat_history.append(f"<span style='color: #31a24c;'><b>[МЫСЛИ ИИ]:</b> {safe_content}</span>")
-                elif role == "SYSTEM": self.chat_history.append(f"<span style='color: #0e639c;'><b>[СИСТЕМА] {safe_content}</b></span>")
+                elif role == "SYSTEM": self.chat_history.append(f"<div style='color: #858585; font-size: 13px; margin-left: 10px;'>[СИСТЕМА] {safe_content}</div>")
                     
             self.chat_history.append("<br><span style='color: #888888;'><i>--- Текущая сессия ---</i></span><br>")
             self.scroll_chat()
@@ -412,7 +424,7 @@ class MainWindow(QMainWindow):
     def open_time_machine(self, file_path):
         dialog = TimeMachineDialog(self, file_path, self.file_manager)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.log_system(f"Файл {os.path.basename(file_path)} успешно восстановлен из бэкапа!", color="#d32f2f")
+            self.log_system(f"Файл {os.path.basename(file_path)} успешно восстановлен из бэкапа!", color="#d32f2f", is_bold=True)
             if self.current_file_path == file_path:
                 with open(file_path, 'r', encoding='utf-8') as f:
                     self.editor.setText(f.read())
@@ -424,12 +436,21 @@ class MainWindow(QMainWindow):
         self.prompt_input.highlighter.rehighlight()
 
     def handle_chat_link(self, url: QUrl):
-        if url.scheme() == "relay":
-            entry = self.chat_logger.get_by_id(url.path())
+        url_str = url.toString()
+        if "relay" in url_str:
+            entry_id = url.path() if url.scheme() == "relay" else url_str.split(":")[-1]
+            entry = self.chat_logger.get_by_id(entry_id)
             if entry and entry.get("hidden_data"):
                 self.show_raw_text_dialog("Текст Эстафеты", entry["hidden_data"])
-        elif url.scheme() == "view_prompt":
-            self.show_raw_text_dialog("Сырой запрос к ИИ", self.last_full_prompt)
+
+    # --- НОВЫЙ МЕТОД ДЛЯ КНОПКИ ИНСПЕКТОРА ---
+    def open_inspector(self):
+        trace = getattr(self.ai_controller, 'agent_trace', [])
+        if not trace:
+            self.show_raw_text_dialog("Сырой запрос к ИИ", self.last_full_prompt or "Пока нет данных. Отправьте запрос.")
+        else:
+            dlg = InspectorDialog(self, trace)
+            dlg.exec()
 
     def show_raw_text_dialog(self, title, text):
         from PyQt6.QtWidgets import QVBoxLayout
@@ -490,66 +511,56 @@ class MainWindow(QMainWindow):
             self.ai_controller.bridge.is_paused = True
             self.btn_pause.setText("▶ Продолжить")
             self.btn_pause.setStyleSheet("background-color: #31a24c; color: white; font-weight: bold; border-radius: 3px; padding: 2px 10px; font-size: 11px; margin-left: 5px;")
-            self.log_system("⏸ РАБОТА ПРИОСТАНОВЛЕНА", color="#ffaa00")
+            self.log_system("⏸ РАБОТА ПРИОСТАНОВЛЕНА", color="#ffaa00", is_bold=True)
         else:
             self.ai_controller.bridge.is_paused = False
             self.btn_pause.setText("■ Пауза")
             self.btn_pause.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold; border-radius: 3px; padding: 2px 10px; font-size: 11px; margin-left: 5px;")
-            self.log_system("▶ РАБОТА ВОЗОБНОВЛЕНА", color="#31a24c")
+            self.log_system("▶ РАБОТА ВОЗОБНОВЛЕНА", color="#31a24c", is_bold=True)
 
     def show_history(self):
         dlg = HistoryDialog(self, self.chat_logger)
         dlg.exec()
 
-    def log_system(self, text, color="#0e639c"):
+    def log_system(self, text, color="#858585", is_bold=False):
         self.chat_logger.log("SYSTEM", text)
-        self.chat_history.append(f"<span style='color: {color};'><b>[СИСТЕМА] {text}</b></span>")
+        weight = "bold" if is_bold else "normal"
+        html_msg = f"<div style='color: {color}; font-weight: {weight}; font-size: 13px; margin-left: 10px;'>[СИСТЕМА] {text}</div>"
+        self.chat_history.append(html_msg)
         self.scroll_chat()
 
     def scroll_chat(self):
         scrollbar = self.chat_history.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
-    # --- ФАЗА 23.5: АВТО-ПРИКРЕПЛЕНИЕ И АВТО-ОТПРАВКА ---
     def handle_terminal_error(self, error_text):
-        """Парсит Traceback, прикрепляет сломанный файл и сразу отправляет задачу ИИ"""
-        
-        # 1. Ищем пути к файлам в тексте ошибки (регулярное выражение)
         file_paths = re.findall(r'File "(.*?)", line', error_text)
         
         culprit_file = None
-        # Идем по списку с конца, так как сама причина ошибки обычно внизу Traceback
         for path in reversed(file_paths):
             norm_path = os.path.normpath(path)
-            # Проверяем, принадлежит ли файл нашему проекту (отсеиваем системные либы Python)
             if norm_path.startswith(os.path.normpath(self.project_path)):
                 culprit_file = norm_path
                 break
                 
-        # 2. Формируем текст промпта
+        marker = '`' * 3
         fix_prompt = (
             f"В моем коде произошла ошибка во время выполнения. "
             f"Проанализируй этот Traceback, определи проблемный файл и причину.\n\n"
             f"Лог терминала:\n"
-            f"```\n{error_text}\n```\n\n"
+            f"{marker}\n{error_text}\n{marker}\n\n"
             f"Пришли мне JSON с командой поиска и замены (search/replace) для ее исправления."
         )
         self.prompt_input.setPlainText(fix_prompt)
         
-        # 3. АВТОМАТИЧЕСКИ ПРИКРЕПЛЯЕМ ФАЙЛ
         if culprit_file:
-            # Превращаем абсолютный путь в относительный для красивого отображения
             rel_path = os.path.relpath(culprit_file, self.project_path)
-            
-            # Добавляем файл в память интерфейса, как если бы юзер сделал ПКМ -> Прикрепить
             self.attached_files.add(rel_path)
             self.attachment_panel.add_attachment(culprit_file)
             self.prompt_input.highlighter.rehighlight()
             
-            self.log_system(f"🩺 Терминал поймал ошибку! Файл {rel_path} прикреплен автоматически.", color="#d32f2f")
+            self.log_system(f"🩺 Терминал поймал ошибку! Файл {rel_path} прикреплен автоматически.", color="#d32f2f", is_bold=True)
         else:
-            self.log_system("🩺 Терминал поймал ошибку, но файл не найден. Промпт сформирован.", color="#d32f2f")
+            self.log_system("🩺 Терминал поймал ошибку, но файл не найден. Промпт сформирован.", color="#d32f2f", is_bold=True)
 
-        # 4. МАГИЯ: АВТО-ОТПРАВКА!
-        # Эмулируем нажатие кнопки отправки, чтобы всё произошло в один клик
         self.btn_send.click()

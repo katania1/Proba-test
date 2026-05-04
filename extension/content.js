@@ -1,5 +1,5 @@
 /**
- * 📖 БИБЛИЯ ПРОЕКТА: CONTENT.JS (v2.9.11 - SMART PRO-MODE SELECTOR & MULTIMODALITY)
+ * 📖 БИБЛИЯ ПРОЕКТА: CONTENT.JS (v2.9.14 - FULL UNCOMPRESSED & REVERSE-ENGINEERING)
  */
 
 let myTabId = sessionStorage.getItem('vc_tab_id');
@@ -8,6 +8,9 @@ if (!myTabId) {
     sessionStorage.setItem('vc_tab_id', myTabId);
 }
 let myTabName = localStorage.getItem(`vc_name_${myTabId}`) || myTabId;
+
+// Глобальный флаг для ручного продолжения работы на Flash-версии
+window.ignoreLimitsSession = false;
 
 setInterval(() => {
     fetch('http://localhost:5070/heartbeat', {
@@ -117,7 +120,7 @@ function updatePanelUI(isPaused, serverDown = false) {
         statusSpan.style.background = '#ff4444'; statusSpan.style.color = 'white';
         return;
     }
-    if (isLimitReached) {
+    if (isLimitReached && !window.ignoreLimitsSession) {
         badge.style.border = '2px solid #ff4444';
         statusSpan.innerHTML = '🛑 ЛИМИТЫ';
         statusSpan.style.background = '#ff4444'; statusSpan.style.color = 'white';
@@ -186,6 +189,18 @@ async function triggerLimitReached(reason) {
 }
 
 async function checkGeminiAlerts() {
+    if (window.ignoreLimitsSession) return false;
+
+    // Прямой поиск по всему тексту (самый надежный вариант для новых интерфейсов)
+    const bodyText = (document.body.innerText || "").toLowerCase();
+    if (bodyText.includes("you've reached your pro model limit") || 
+        bodyText.includes("limit resets on") ||
+        bodyText.includes("лимит запросов исчерпан")) {
+        await triggerLimitReached("Обнаружен текст о лимитах на странице");
+        return true;
+    }
+
+    // Резервный поиск по элементам ошибок
     const alerts = document.querySelectorAll('snack-bar, .error-message, [role="alert"], .limit-message');
     for (let el of alerts) {
         const t = (el.innerText || "").toLowerCase();
@@ -197,16 +212,17 @@ async function checkGeminiAlerts() {
     return false;
 }
 
-// ---> НОВЫЙ БРОНЕБОЙНЫЙ АЛГОРИТМ ВЫБОРА PRO-МОДЕЛИ <---
 async function ensureProMode() {
+    if (window.ignoreLimitsSession) {
+        console.log("VibeCoder: Игнорируем проверку Pro-режима по выбору пользователя (работаем на Flash).");
+        return true; 
+    }
+
     console.log("VibeCoder: Проверка активности Pro-режима...");
     
-    // Ищем любые кликабельные элементы, которые могут быть переключателем модели
     const clickableElements = Array.from(document.querySelectorAll('button, [role="button"], [role="combobox"]'));
-    
     const modelSelector = clickableElements.find(el => {
         const text = (el.innerText || el.textContent || "").trim();
-        // Ищем короткие тексты, содержащие наши ключевые слова
         return (text === 'Fast' || text === 'Flash' || text === 'Pro' || text.includes('Advanced')) && text.length < 20;
     });
 
@@ -218,7 +234,6 @@ async function ensureProMode() {
     const currentText = (modelSelector.innerText || modelSelector.textContent || "").trim();
     console.log(`VibeCoder: Текущая выбранная модель: [${currentText}]`);
 
-    // Если уже Pro или Advanced — всё в порядке, выходим
     if (currentText.includes('Pro') || currentText.includes('Advanced')) {
         console.log("VibeCoder: Pro-режим уже активен.");
         return true;
@@ -226,9 +241,8 @@ async function ensureProMode() {
 
     console.log("VibeCoder: Обнаружена базовая модель. Пытаюсь переключить на Pro...");
     modelSelector.click();
-    await new Promise(r => setTimeout(r, 800)); // Ждем анимацию открытия меню
+    await new Promise(r => setTimeout(r, 800)); 
 
-    // Ищем элементы внутри открывшегося меню
     const menuItems = Array.from(document.querySelectorAll('menu-item, [role="menuitem"], [role="option"], [role="menuitemradio"], li'));
     const proItem = menuItems.find(i => {
         const t = (i.innerText || i.textContent || "").trim();
@@ -239,17 +253,18 @@ async function ensureProMode() {
         const itemText = (proItem.innerText || proItem.textContent || "").trim();
         if (itemText.includes('Upgrade') || itemText.includes('Обновить')) {
             console.warn("VibeCoder: Опция Pro заблокирована (требуется подписка/лимит исчерпан).");
-            await triggerLimitReached("Требуется подписка/Лимит");
+            document.body.click();
+            await triggerLimitReached("Опция Pro требует обновления");
             return false;
         }
         
         console.log("VibeCoder: Кликаем по опции Pro...");
         proItem.click();
-        await new Promise(r => setTimeout(r, 1000)); // Ждем применения
+        await new Promise(r => setTimeout(r, 1000));
         return true;
     } else {
         console.error("VibeCoder: ❌ В меню не найдена модель Pro/Advanced. Лимиты исчерпаны?");
-        document.body.click(); // Закрываем меню кликом в пустоту
+        document.body.click(); 
         await triggerLimitReached("Модель Pro недоступна в меню");
         return false;
     }
@@ -271,22 +286,65 @@ function base64ToFile(base64Data, mimeType, filename) {
     return new File([blob], filename, { type: mimeType });
 }
 
+// --- НОВАЯ МАГИЯ: Извлекает текст, восстанавливая блоки кода ---
+function extractGeminiText(element) {
+    let clone = element.cloneNode(true);
+    
+    // Создаем невидимый контейнер, чтобы innerText отработал правильно
+    let container = document.createElement('div');
+    Object.assign(container.style, {
+        position: 'absolute', left: '-9999px', top: '0', visibility: 'hidden', display: 'block'
+    });
+    container.appendChild(clone);
+    document.body.appendChild(container);
+
+    // Удаляем кнопки "Копировать", чтобы они не попадали в наш текст
+    clone.querySelectorAll('button, .copy-button, [aria-label*="Copy"]').forEach(btn => btn.remove());
+
+    // Ищем все блоки с кодом и возвращаем им Markdown-формат
+    let pres = clone.querySelectorAll('pre');
+    pres.forEach(pre => {
+        let code = pre.innerText || pre.textContent;
+        let lang = '';
+        
+        // Пытаемся найти название языка (Gemini обычно пишет его над кодом)
+        let wrapper = pre.closest('.code-block, code-block, [class*="code"]');
+        if (wrapper) {
+            let header = wrapper.querySelector('.language-name, [class*="header"], span');
+            if (header) lang = (header.innerText || '').trim().split('\n')[0];
+        }
+
+        let textNode = document.createTextNode(`\n\`\`\`${lang}\n${code}\n\`\`\`\n`);
+        pre.replaceWith(textNode);
+    });
+
+    let result = clone.innerText || clone.textContent;
+    document.body.removeChild(container);
+    return result;
+}
+
 async function checkServer() {
     if (isProcessing) return; 
     try {
-        if (isLimitReached || isSystemPaused) return;
-        if (await checkGeminiAlerts()) return;
-
         let taskUrl = `${SERVER_URL}/get_task?target_id=${encodeURIComponent(myTabId)}`;
-        
         const data = await fetchGetProxy(taskUrl);
         
         if (data.status === "paused") {
             isSystemPaused = true;
             updatePanelUI(true, false);
-            return;
+            return; 
         } else {
+            // Если была пауза из-за лимитов, а теперь паузы нет - юзер нажал "Продолжить"
+            if (isSystemPaused && isLimitReached) {
+                console.log("VibeCoder: Пауза снята сервером! Пользователь решил продолжить на Flash.");
+                window.ignoreLimitsSession = true;
+                isLimitReached = false;
+            }
             isSystemPaused = false;
+        }
+
+        if (!window.ignoreLimitsSession) {
+            if (await checkGeminiAlerts()) return; 
         }
 
         if (data.status === "success" && data.task) {
@@ -306,6 +364,11 @@ async function checkServer() {
             return;
         }
 
+        if (isLimitReached) {
+            updatePanelUI(false, false);
+            return;
+        }
+
         const generatingElements = document.querySelectorAll(['button[aria-label*="Stop generating"]', 'button[aria-label*="Остановить"]', '.gmat-mdc-progress-spinner', 'mat-spinner'].join(', '));
         let isGenerating = false;
         for (let el of generatingElements) { if (el.offsetWidth > 0 || el.offsetHeight > 0) { isGenerating = true; break; } }
@@ -320,7 +383,9 @@ async function checkServer() {
         const modelResponses = document.querySelectorAll(['message-content', '.model-response-text', '[data-message-author-role="model"]'].join(', '));
         if (modelResponses.length > 0) {
             const lastResponse = modelResponses[modelResponses.length - 1];
-            let text = lastResponse.innerText || lastResponse.textContent;
+            
+            // --- ИСПОЛЬЗУЕМ НАШ НОВЫЙ ЭКСТРАКТОР HTML -> MARKDOWN ---
+            let text = extractGeminiText(lastResponse);
             
             if (text && text.trim() !== "") {
                 if (text !== currentCandidateText) { currentCandidateText = text; stableCount = 0; } 
@@ -351,7 +416,6 @@ async function checkServer() {
 }
 
 async function sendToGemini(text, images = []) {
-    // 0. ПРОВЕРКА PRO-РЕЖИМА!
     if (!await ensureProMode()) { 
         isProcessing = false; 
         return; 

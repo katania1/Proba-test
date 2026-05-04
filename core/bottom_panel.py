@@ -1,62 +1,67 @@
-from PyQt6.QtWidgets import QWidget, QHBoxLayout, QPushButton, QSizePolicy
+from PyQt6.QtWidgets import QWidget, QHBoxLayout, QPushButton, QLabel
 from PyQt6.QtCore import Qt
 
 class BottomPanelWidget(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setFixedHeight(35)
-        self.init_ui()
-
-    def init_ui(self):
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 5, 0, 0)
-        layout.setSpacing(5)
-
-        flex_policy = QSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
-
-        # === ЛЕВЫЙ БЛОК ===
-        btn_icon_style = "background-color: #333333; color: white; font-size: 15px; border-radius: 4px; padding: 0px;"
+    def __init__(self):
+        super().__init__()
+        self.setFixedHeight(40)
+        self.setStyleSheet("""
+            QWidget { background-color: #252526; border-top: 1px solid #3c3c3c; }
+            QPushButton { 
+                background-color: transparent; 
+                color: #d4d4d4; 
+                border: none; 
+                padding: 5px 10px; 
+                border-radius: 4px;
+                font-size: 13px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #3c3c3c; }
+            QLabel { color: #d4d4d4; font-size: 13px; padding: 5px; }
+        """)
         
-        self.btn_attach = QPushButton("📎")
-        self.btn_attach.setToolTip("Прикрепить медиа-файл (картинку)")
-        self.btn_attach.setFixedSize(30, 30)
-        self.btn_attach.setStyleSheet(btn_icon_style)
-
-        self.btn_history = QPushButton("📜")
-        self.btn_history.setToolTip("Умная история проекта и сессий")
-        self.btn_history.setFixedSize(30, 30)
-        self.btn_history.setStyleSheet(btn_icon_style)
-
-        self.btn_relay = QPushButton("🔄")
-        self.btn_relay.setToolTip("Сформировать транзитный пакет (эстафету)")
-        self.btn_relay.setFixedSize(30, 30)
-        self.btn_relay.setStyleSheet("background-color: #005f73; color: white; font-size: 15px; border-radius: 4px; padding: 0px;")
-
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 0, 10, 0)
+        layout.setSpacing(8)
+        
+        # Кнопки панели
+        self.btn_attach = QPushButton("📎 Прикрепить")
+        self.btn_history = QPushButton("🕒 История")
+        self.btn_relay = QPushButton("🔄 Эстафета")
+        self.btn_git = QPushButton("📦 Git")
+        self.btn_rag = QPushButton("🧠 RAG")
+        self.btn_api = QPushButton("⚙️ API")
+        
+        # --- НОВОЕ: Индикатор здоровья MCP (Светофор) ---
+        self.lbl_mcp_status = QLabel("🛠️ MCP: ⚪")
+        self.lbl_mcp_status.setToolTip("Статус Model Context Protocol (инициализация...)")
+        self.lbl_mcp_status.setStyleSheet("color: #858585;")
+        
+        # Добавляем элементы в левую часть
         layout.addWidget(self.btn_attach)
         layout.addWidget(self.btn_history)
         layout.addWidget(self.btn_relay)
-
-        # ПРУЖИНА (Разделяет блоки)
-        layout.addStretch()
-
-        # === ПРАВЫЙ БЛОК ===
-        btn_text_style = "background-color: #333333; color: white; font-weight: bold; border-radius: 4px; padding: 0 10px;"
-
-        self.btn_api = QPushButton("⚙️ API")
-        self.btn_api.setFixedHeight(30)
-        self.btn_api.setSizePolicy(flex_policy)
-        self.btn_api.setStyleSheet(btn_text_style)
-
-        self.btn_git = QPushButton("📦 Git")
-        self.btn_git.setFixedHeight(30)
-        self.btn_git.setSizePolicy(flex_policy)
-        self.btn_git.setStyleSheet("background-color: #4a148c; color: white; font-weight: bold; border-radius: 4px; padding: 0 10px;")
-
-        self.btn_rag = QPushButton("🧠 RAG (Индекс)")
-        self.btn_rag.setFixedHeight(30)
-        self.btn_rag.setSizePolicy(flex_policy)
-        self.btn_rag.setStyleSheet("background-color: #00838f; color: white; font-weight: bold; border-radius: 4px; padding: 0 10px;")
-
-        layout.addWidget(self.btn_api)
         layout.addWidget(self.btn_git)
         layout.addWidget(self.btn_rag)
+        
+        # Пружина, чтобы прижать правые элементы к краю
+        layout.addStretch()
+        
+        # Добавляем элементы в правую часть
+        layout.addWidget(self.lbl_mcp_status)
+        layout.addWidget(self.btn_api)
+
+    def update_mcp_status(self, status, message):
+        """Обновляет цвет и текст тултипа для индикатора MCP"""
+        if status == "online":
+            self.lbl_mcp_status.setText("🛠️ MCP: 🟢")
+            self.lbl_mcp_status.setStyleSheet("color: #31a24c; font-weight: bold;")
+            self.lbl_mcp_status.setToolTip(message)
+        elif status == "error":
+            self.lbl_mcp_status.setText("🛠️ MCP: 🔴")
+            self.lbl_mcp_status.setStyleSheet("color: #ff4444; font-weight: bold;")
+            self.lbl_mcp_status.setToolTip(message)
+        else:
+            self.lbl_mcp_status.setText("🛠️ MCP: ⚪")
+            self.lbl_mcp_status.setStyleSheet("color: #858585;")
+            self.lbl_mcp_status.setToolTip(message)

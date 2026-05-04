@@ -76,7 +76,10 @@ class MCPManager:
         self.external_client = None
         self.external_tools = []
         
-        # --- ФАЗА 24: Интеграция Enterprise Серверов ---
+        # --- НОВОЕ: Переменные для Светофора (Индикатора здоровья) ---
+        self.status = "offline" 
+        self.error_message = "MCP не инициализирован"
+        
         # ВСТАВЬ СВОЙ КЛЮЧ ОТ CONTEXT7 СЮДА:
         self.context7_api_key = "ctx7sk-53f7a253-a33f-4b82-b243-6eae7aa3a016" 
         
@@ -136,8 +139,19 @@ class MCPManager:
                             "parameters": tool.get("inputSchema", {})
                         }
                     })
+                    
+                # --- НОВОЕ: Успешный статус ---
+                self.status = "online"
+                self.error_message = f"Context7 подключен (Доступно инструментов: {len(c7_tools)})"
+                
             except Exception as e:
-                print(f"⚠️ Ошибка инициализации Context7: {e}")
+                # --- НОВОЕ: Статус ошибки ---
+                self.status = "error"
+                self.error_message = f"Ошибка Context7: {str(e)}"
+                print(f"⚠️ {self.error_message}")
+        else:
+            self.status = "offline"
+            self.error_message = "Ключ Context7 не задан. Внешние инструменты отключены."
 
     def get_tools_schema(self):
         """Возвращает объединенный список: локальные + скачанные с Context7"""
