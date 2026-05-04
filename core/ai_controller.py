@@ -10,6 +10,7 @@ from core.api_worker import APIWorker
 from core.providers import OpenAIProvider, AnthropicProvider, GeminiAPIProvider
 from core.vector_db import VectorDatabase
 from core.embeddings import EmbeddingFactory
+from core.mcp_manager import MCPManager # --- ФАЗА 24: Импорт MCP Диспетчера ---
 
 class AIController(QObject):
     ai_response_signal = pyqtSignal(str)
@@ -70,10 +71,11 @@ class AIController(QObject):
             rag_context += "Ниже представлены фрагменты кода из текущего проекта, которые семантически связаны с запросом пользователя.\n"
             rag_context += "Используй их для понимания архитектуры, но не меняй, если пользователь явно не просил.\n\n"
             
+            marker = '`' * 3
             for i, res in enumerate(results):
                 file_path = res['metadata'].get('file_path', 'Неизвестный файл')
                 rag_context += f"--- Файл: {file_path} (Совпадение #{i+1}) ---\n"
-                rag_context += f"```python\n{res['text']}\n```\n\n"
+                rag_context += f"{marker}python\n{res['text']}\n{marker}\n\n"
 
             self.mw.log_system(f"🧠 [RAG] Найдено {len(results)} релевантных фрагментов. Контекст добавлен к запросу.", "#31a24c")
             
@@ -93,7 +95,13 @@ class AIController(QObject):
         selected_model = engine_data.get("model", "")
         
         target_id = self.mw.get_current_target_id()
-        selected_tab = self.mw.combo_tabs.currentText()
+        
+        # --- ИСПРАВЛЕНИЕ ОШИБКИ: Безопасный поиск combo_tabs ---
+        try:
+            selected_tab = self.mw.status_bar.combo_tabs.currentText()
+        except AttributeError:
+            # Запасной вариант, если элемент перемещен или не найден
+            selected_tab = "Browser"
         
         if provider_id == "Browser" and "🔴" in selected_tab:
             self.mw.show_popup("Ошибка связи", "Нет активных вкладок браузера!\nОткройте Gemini и обновите страницу.", is_error=True)
@@ -128,6 +136,7 @@ class AIController(QObject):
         # ОБОГАЩАЕМ ЗАПРОС ЧЕРЕЗ RAG
         enriched_text = self._enrich_with_rag_context(user_text)
 
+        marker = '`' * 3
         attached_blocks = []
         tags_in_text = re.findall(r'@\[.*?\]|@[\w\.\-\/\\]+', user_text)
         for tag in tags_in_text:
@@ -135,7 +144,7 @@ class AIController(QObject):
             if fname in self.mw.attached_files:
                 content = self.mw.get_file_content_safe(fname)
                 if content: 
-                    attached_blocks.append("### ФАЙЛ: " + fname + " ###\n```\n" + content + "\n```")
+                    attached_blocks.append("### ФАЙЛ: " + fname + " ###\n" + marker + "\n" + content + "\n" + marker)
         
         final_prompt_text = enriched_text + ("\n\n[СИСТЕМНЫЙ БЛОК: ПРИКРЕПЛЕННЫЙ КОД]\n" + "\n\n".join(attached_blocks) + "\n[КОНЕЦ СИСТЕМНОГО БЛОКА]" if attached_blocks else "")
             
@@ -197,13 +206,16 @@ class AIController(QObject):
                 media_log = f" и {len(image_paths)} картинками" if image_paths else ""
                 self.mw.log_system(f"Отправка запроса{media_log} через API (Модель: {selected_model})...")
                 
-                # Магия лямбды: подменяем метод, чтобы прокинуть картинки в фоновый поток без изменения APIWorker
                 original_generate = provider.generate
                 provider.generate = lambda p, sp: original_generate(p, sp, model=selected_model, image_paths=image_paths)
                 
-                self.worker = APIWorker(provider, self.mw.last_full_prompt, self.orchestrator.system_prompt)
+                # --- ФАЗА 24: Инъекция MCP Диспетчера в Воркер ---
+                mcp = MCPManager(self.mw.project_path)
+                
+                self.worker = APIWorker(provider, self.mw.last_full_prompt, self.orchestrator.system_prompt, mcp_manager=mcp)
                 self.worker.finished_signal.connect(self.process_ai_response)
                 self.worker.error_signal.connect(lambda err: self.mw.log_system(f"ОШИБКА API: {err}", color="#ff4444"))
+                self.worker.log_signal.connect(lambda msg: self.mw.log_system(msg, color="#bb86fc"))
                 self.worker.start()
         except Exception as e:
             self.mw.show_popup("Ошибка конфигурации API", str(e), is_error=True)
@@ -214,9 +226,10 @@ class AIController(QObject):
         if len(diff_text) > 10000:
             diff_text = diff_text[:10000] + "\n...[DIFF СЛИШКОМ БОЛЬШОЙ, ОБРЕЗАН]..."
 
+        marker = '`' * 3
         prompt = (
             "Сгенерируй короткое, профессиональное сообщение для Git коммита на основе этого Diff кода:\n\n"
-            f"```diff\n{diff_text}\n```\n\n"
+            f"{marker}diff\n{diff_text}\n{marker}\n\n"
             "Напиши текст коммита в поле 'thoughts', а массив 'updates' оставь пустым []. "
             "Пиши на русском языке, используй общепринятые префиксы (feat:, fix:, refactor:). "
             "ВАЖНО: КАТЕГОРИЧЕСКИ ЗАПРЕЩАЕТСЯ использовать двойные кавычки (\") внутри текста коммита. "
@@ -275,11 +288,12 @@ class AIController(QObject):
             self.execute_api_task(engine_data.get("provider_id"), engine_data.get("model"))
 
     def send_requested_files(self, file_paths):
+        marker = '`' * 3
         attached_blocks = []
         for path in file_paths:
             content = self.mw.get_file_content_safe(path)
             if content: 
-                attached_blocks.append("### ФАЙЛ: " + path + " ###\n```\n" + content + "\n```")
+                attached_blocks.append("### ФАЙЛ: " + path + " ###\n" + marker + "\n" + content + "\n" + marker)
             else:
                 attached_blocks.append("### ФАЙЛ: " + path + " ###\n[ФАЙЛ НЕ НАЙДЕН ИЛИ ПУСТ]")
         
@@ -327,8 +341,9 @@ class AIController(QObject):
                 match = re.search(r'"thoughts"\s*:\s*"(.*?)"\s*,\s*"(?:request_files|create_files|updates)"', json_str, re.DOTALL)
                 if match:
                     return match.group(1).replace('\\n', '\n').replace('\\"', '"')
-                    
-        return raw_text.replace('```json', '').replace('```', '').strip()
+        
+        marker = '`' * 3
+        return raw_text.replace(f'{marker}json', '').replace(marker, '').strip()
 
     def process_ai_response(self, raw_text):
         if self.is_waiting_for_relay_msg:
@@ -498,12 +513,13 @@ class AIController(QObject):
                             self.mw.log_system(f"ИИ ОШИБСЯ С КОНТЕКСТОМ! Блок не найден в {rel_path}. Запрос переделки...", color="#ffaa00")
                             self.retry_count += 1
                             
+                            marker = '`' * 3
                             error_prompt = (
                                 "Твой ответ отклонен системой (Smart Diff Error).\n"
                                 f"Я не нашел следующий блок 'search' в файле {rel_path}:\n"
-                                "```python\n"
+                                f"{marker}python\n"
                                 f"{failed_search_block}\n"
-                                "```\n"
+                                f"{marker}\n"
                                 "Пожалуйста, скопируй ТОЧНЫЕ строки из моего исходного файла в поле 'search'. Или оставь 'search' пустым, если пишешь файл с нуля. Повтори JSON."
                             )
                             
