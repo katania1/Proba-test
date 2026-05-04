@@ -2,7 +2,7 @@ import os
 import re
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QSplitter, 
                              QVBoxLayout, QDialog, QTabWidget, QTextBrowser, 
-                             QLabel, QFileDialog, QPushButton, QMessageBox)
+                             QLabel, QFileDialog, QPushButton, QMessageBox, QSizePolicy)
 from PyQt6.QtCore import Qt, QDir, QUrl, QSettings, QEvent
 from PyQt6.QtGui import QShortcut, QKeySequence
 
@@ -137,39 +137,53 @@ class MainWindow(QMainWindow):
 
         action_layout = QHBoxLayout()
         action_layout.setContentsMargins(5, 0, 5, 5)
-        action_layout.addStretch() 
         
         btn_action_style = "color: white; font-weight: bold; border-radius: 3px; padding: 2px 10px; font-size: 11px; margin-left: 5px;"
 
-        # --- НОВАЯ КНОПКА ИНСПЕКТОРА ---
         self.btn_inspector = QPushButton("🐞 Инспектор")
         self.btn_inspector.setFixedHeight(24)
+        self.btn_inspector.setMinimumWidth(80) # Мягкий предел сжатия
         self.btn_inspector.setStyleSheet(f"background-color: #005f73; {btn_action_style}")
+        self.btn_inspector.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
         self.btn_inspector.clicked.connect(self.open_inspector)
 
-        self.btn_send = QPushButton("➤ Отправить")
-        self.btn_send.setFixedHeight(24)
-        self.btn_send.setStyleSheet(f"background-color: #b58900; color: #1e1e1e; {btn_action_style.replace('color: white;', '')}")
-        
-        self.btn_pause = QPushButton("■ Пауза")
-        self.btn_pause.setCheckable(True)
-        self.btn_pause.setFixedHeight(24)
-        self.btn_pause.setStyleSheet(f"background-color: #d32f2f; {btn_action_style}")
-        
         self.btn_approve = QPushButton("✅ Утвердить код")
         self.btn_approve.setFixedHeight(24)
+        self.btn_approve.setMinimumWidth(100)
         self.btn_approve.setStyleSheet(f"background-color: #2e7d32; {btn_action_style}")
+        self.btn_approve.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
         
         self.btn_reject_main = QPushButton("❌ Отклонить")
         self.btn_reject_main.setFixedHeight(24)
+        self.btn_reject_main.setMinimumWidth(80)
         self.btn_reject_main.setStyleSheet(f"background-color: #512525; {btn_action_style}")
+        self.btn_reject_main.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
         self.btn_reject_main.setVisible(False)
+
+        self.btn_pause = QPushButton("■ Пауза")
+        self.btn_pause.setCheckable(True)
+        self.btn_pause.setFixedHeight(24)
+        self.btn_pause.setMinimumWidth(70)
+        self.btn_pause.setStyleSheet(f"background-color: #d32f2f; {btn_action_style}")
+        self.btn_pause.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
+
+        self.btn_send = QPushButton("➤ Отправить")
+        self.btn_send.setFixedHeight(24)
+        self.btn_send.setMinimumWidth(80)
+        self.btn_send.setStyleSheet(f"background-color: #b58900; color: #1e1e1e; {btn_action_style.replace('color: white;', '')}")
+        self.btn_send.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
+
+        # 1. Сначала Инспектор
+        action_layout.addWidget(self.btn_inspector)
         
-        action_layout.addWidget(self.btn_inspector) # Добавили кнопку в интерфейс
-        action_layout.addWidget(self.btn_send)
-        action_layout.addWidget(self.btn_pause)
+        # 2. Пружина (Прижимает Инспектор влево, остальные вправо)
+        action_layout.addStretch()
+        
+        # 3. Остальные кнопки (Утвердить и Отправить поменяли местами)
         action_layout.addWidget(self.btn_approve)
         action_layout.addWidget(self.btn_reject_main)
+        action_layout.addWidget(self.btn_pause)
+        action_layout.addWidget(self.btn_send)
 
         input_layout.addLayout(action_layout)
         
@@ -443,7 +457,6 @@ class MainWindow(QMainWindow):
             if entry and entry.get("hidden_data"):
                 self.show_raw_text_dialog("Текст Эстафеты", entry["hidden_data"])
 
-    # --- НОВЫЙ МЕТОД ДЛЯ КНОПКИ ИНСПЕКТОРА ---
     def open_inspector(self):
         trace = getattr(self.ai_controller, 'agent_trace', [])
         if not trace:
