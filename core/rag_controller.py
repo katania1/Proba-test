@@ -5,6 +5,7 @@ from PyQt6.QtCore import QDir, QTimer
 from core.vector_db import VectorDatabase
 from core.indexer_worker import IndexerWorker
 from core.rag_dialog import RAGAnalyticsDialog
+from core.embeddings import EmbeddingFactory
 
 class RagController:
     def __init__(self, main_window):
@@ -27,125 +28,129 @@ class RagController:
 
         self.allowed_extensions = {
             '.py', '.js', '.html', '.css', '.md', '.txt', '.json', 
-            '.bat', '.sh', '.cpp', '.c', '.h', '.java', '.go'
+            '.bat', '.sh', '.cpp', '.h', '.cs', '.java', '.php', '.go', '.rs'
         }
-        self.ignore_dirs = {'.git', '.vibecoder', 'venv', 'env', '__pycache__', 'node_modules', '.idea'}
 
-        self.setup_watcher()
+    # ==========================================
+    # ИЗВЛЕЧЕНИЕ КОНТЕКСТА (Перенесено из AIController)
+    # ==========================================
+    def get_context_for_prompt(self, user_text):
+        if not user_text or len(user_text.strip()) < 10:
+            return ""
 
-    def setup_watcher(self):
-        """Запускает таймер и собирает стартовые даты всех файлов проекта"""
-        if not self.mw.project_path or len(self.mw.project_path) <= 3: 
-            self.poll_timer.stop()
-            return
+        db_path = os.path.join(self.mw.project_path, ".vibecoder", "vector_db")
+        if not os.path.exists(db_path):
+            return ""
 
-        self.last_mtimes.clear()
-        
-        # Первичное сканирование (без запуска индексации)
-        self._scan_all_files(initial_setup=True)
-        
-        # Запускаем бесконечный цикл проверок (каждые 10000 мс)
-        self.poll_timer.start(10000)
-
-    def _scan_all_files(self, initial_setup=False):
-        """Пробегает по файлам и ищет изменения в дате редактирования (mtime)"""
-        # Если автообновление выключено в настройках - ничего не делаем
-        if not self.mw.settings.value("auto_rag_update", True, type=bool) and not initial_setup:
-            return
-
-        has_changes = False
-        current_files = set()
-
-        # Быстрый проход по директориям
-        for root, dirs, files in os.walk(self.mw.project_path):
-            # Отсекаем мусорные папки на лету
-            dirs[:] = [d for d in dirs if d not in self.ignore_dirs]
-            
-            for filename in files:
-                ext = os.path.splitext(filename)[1].lower()
-                if ext in self.allowed_extensions:
-                    file_path = os.path.join(root, filename)
-                    current_files.add(file_path)
-                    
-                    try:
-                        mtime = os.path.getmtime(file_path)
-                        
-                        # 1. Если это новый файл
-                        if file_path not in self.last_mtimes:
-                            self.last_mtimes[file_path] = mtime
-                            if not initial_setup: 
-                                has_changes = True
-                                
-                        # 2. Если файл изменили (дата новее)
-                        elif mtime > self.last_mtimes[file_path]:
-                            self.last_mtimes[file_path] = mtime
-                            has_changes = True
-                            
-                    except OSError:
-                        pass # Файл недоступен
-
-        # 3. Проверяем, не удалили ли какой-то файл
-        deleted_files = set(self.last_mtimes.keys()) - current_files
-        if deleted_files:
-            for f in deleted_files:
-                del self.last_mtimes[f]
-            if not initial_setup:
-                has_changes = True
-
-        # Если нашли любые изменения - заводим таймер на индексацию
-        if has_changes and not initial_setup:
-            self.debounce_timer.start()
-
-    def show_analytics(self, pos):
-        if not self.mw.project_path or self.mw.project_path == QDir.currentPath() or len(self.mw.project_path) <= 3:
-            self.mw.show_popup("Ошибка", "Сначала откройте или создайте рабочий проект.")
-            return
-            
         try:
             db = VectorDatabase(self.mw.project_path)
-            dlg = RAGAnalyticsDialog(self.mw, db, self.mw.settings)
-            dlg.exec()
+            if db.collection.count() == 0:
+                return ""
+                
+            embed_provider, _ = EmbeddingFactory.get_provider("Gemini")
+            self.mw.log_system("🔍 [RAG] Векторизация вопроса и поиск по кодовой базе...")
+            
+            query_vector = embed_provider.get_embedding(user_text)
+            results = db.search(query_vector, n_results=3)
+            
+            if not results:
+                return ""
+
+            rag_context = "=== СИСТЕМНЫЙ КОНТЕКСТ ПРОЕКТА (RAG) ===\n"
+            rag_context += "Ниже представлены фрагменты кода из текущего проекта, которые семантически связаны с запросом пользователя.\n"
+            rag_context += "Используй их для понимания архитектуры, но не меняй, если пользователь явно не просил.\n\n"
+            
+            marker = '`' * 3
+            for i, res in enumerate(results):
+                file_path = res['metadata'].get('file_path', 'Неизвестный файл')
+                rag_context += f"--- Файл: {file_path} (Совпадение #{i+1}) ---\n"
+                rag_context += f"{marker}python\n{res['text']}\n{marker}\n\n"
+
+            self.mw.log_system(f"🧠 [RAG] Найдено {len(results)} релевантных фрагментов.")
+            return rag_context
+
         except Exception as e:
-            self.mw.log_system(f"Ошибка открытия базы RAG: {e}", "#ff4444")
+            self.mw.log_system(f"⚠️ Ошибка RAG-поиска: {str(e)}", color="#ffaa00")
+            return ""
+
+    # ==========================================
+    # СИСТЕМА ФОНОВОГО ОТСЛЕЖИВАНИЯ
+    # ==========================================
+    def setup_watcher(self):
+        self.poll_timer.stop()
+        self.debounce_timer.stop()
+        self.last_mtimes.clear()
+        
+        for root, dirs, files in os.walk(self.mw.project_path):
+            dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ('venv', '__pycache__')]
+            for f in files:
+                ext = os.path.splitext(f)[1].lower()
+                if ext in self.allowed_extensions:
+                    path = os.path.join(root, f)
+                    try:
+                        self.last_mtimes[path] = os.path.getmtime(path)
+                    except OSError:
+                        pass
+                        
+        self.poll_timer.start(3000)
+
+    def _scan_all_files(self):
+        has_changes = False
+        current_mtimes = {}
+        
+        for root, dirs, files in os.walk(self.mw.project_path):
+            dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ('venv', '__pycache__')]
+            for f in files:
+                ext = os.path.splitext(f)[1].lower()
+                if ext in self.allowed_extensions:
+                    path = os.path.join(root, f)
+                    try:
+                        mtime = os.path.getmtime(path)
+                        current_mtimes[path] = mtime
+                        if path not in self.last_mtimes or self.last_mtimes[path] != mtime:
+                            has_changes = True
+                    except OSError:
+                        pass
+
+        if has_changes:
+            self.last_mtimes = current_mtimes
+            self.debounce_timer.start()
+
+    # ==========================================
+    # УПРАВЛЕНИЕ ИНДЕКСАЦИЕЙ
+    # ==========================================
+    def show_analytics(self, pos):
+        db = VectorDatabase(self.mw.project_path)
+        dlg = RAGAnalyticsDialog(self.mw, vector_db=db, settings=self.mw.settings)
+        dlg.exec()
 
     def start_indexing(self):
         if self.indexer_worker and self.indexer_worker.isRunning():
             self.indexer_worker.stop()
-            self.mw.btn_rag.setText("⏳ Остановка...")
-            self.mw.btn_rag.setEnabled(False)
-            return
-            
-        if not self.mw.project_path or self.mw.project_path == QDir.currentPath() or len(self.mw.project_path) <= 3:
-            self.mw.show_popup("Ошибка", "Сначала выберите или создайте рабочий проект в Менеджере Проектов.", is_error=True)
-            return
-            
-        reply = self.mw.show_question("RAG Индексация", 
-                                   "Запустить семантическую индексацию проекта?\nЭто может занять некоторое время в зависимости от размера кодовой базы.")
-        if reply == QMessageBox.StandardButton.No:
+            self.mw.btn_rag.setText("🧠 Остановка...")
             return
 
-        self.mw.btn_rag.setEnabled(True)
-        self.mw.btn_rag.setText("🛑 Стоп RAG")
-        self.mw.btn_rag.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold; border-radius: 4px; padding: 0 10px;")
-        
-        self.indexer_worker = IndexerWorker(self.mw.project_path, self.mw.file_manager)
-        self.indexer_worker.progress_signal.connect(self._on_indexer_progress)
-        self.indexer_worker.log_signal.connect(self.mw.log_system)
-        self.indexer_worker.finished_signal.connect(self._on_indexer_finished)
-        self.indexer_worker.error_signal.connect(self._on_indexer_error)
-        
-        self.indexer_worker.start()
+        reply = QMessageBox.question(self.mw, 'Векторная база данных', 
+            "Запустить/обновить семантический индекс для всего проекта?\n(Это может занять время и потратить квоты API).", 
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            
+        if reply == QMessageBox.StandardButton.Yes:
+            self.mw.btn_rag.setEnabled(False)
+            self.mw.btn_rag.setText("🧠 Индексация...")
+            self.mw.btn_rag.setStyleSheet("background-color: #ffaa00; color: black; font-weight: bold; border-radius: 4px; padding: 0 10px;")
+            
+            self.indexer_worker = IndexerWorker(self.mw.project_path, self.mw.file_manager, silent=False)
+            self.indexer_worker.progress_signal.connect(self._on_indexer_progress)
+            self.indexer_worker.finished_signal.connect(self._on_indexer_finished)
+            self.indexer_worker.error_signal.connect(self._on_indexer_error)
+            self.indexer_worker.start()
 
     def trigger_silent_update(self):
-        """Фоновое обновление индекса только для измененных файлов"""
-        if not self.mw.settings.value("auto_rag_update", True, type=bool):
-            return 
-
         if self.indexer_worker and self.indexer_worker.isRunning():
             return 
-
+            
+        self.mw.btn_rag.setText("🧠 Синхронизация...")
         self.mw.btn_rag.setStyleSheet("background-color: #e6a822; color: black; font-weight: bold; border-radius: 4px; padding: 0 10px;")
-        self.mw.btn_rag.setText("⏳ RAG...")
         
         self.indexer_worker = IndexerWorker(self.mw.project_path, self.mw.file_manager, silent=True)
         self.indexer_worker.finished_signal.connect(self._on_silent_rag_finished)
@@ -170,5 +175,4 @@ class RagController:
         self.mw.btn_rag.setText("🧠 RAG (Индекс)")
         self.mw.btn_rag.setStyleSheet("background-color: #00838f; color: white; font-weight: bold; border-radius: 4px; padding: 0 10px;")
         self.mw.update_status_bar()
-        self.mw.show_popup("Ошибка индексации", f"Произошла ошибка при векторизации:\n{err_msg}", is_error=True)
-        self.mw.log_system(f"Ошибка RAG: {err_msg}", "#ff4444")
+        self.mw.show_popup("Ошибка RAG", f"Сбой индексации:\n{err_msg}", is_error=True)
