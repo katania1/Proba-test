@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import base64
 from PyQt6.QtCore import QObject, pyqtSignal, QSettings
 from PyQt6.QtWidgets import QMessageBox, QApplication, QDialog
 
@@ -63,22 +64,21 @@ class AIController(QObject):
         return int(len(text) / 2.5)
 
     def _encode_image_base64(self, filepath):
-        import base64
         with open(filepath, "rb") as f:
             return base64.b64encode(f.read()).decode('utf-8')
 
-    def _enrich_with_rag_context(self, user_text):
+    def _get_rag_context_string(self, user_text):
         if not user_text or len(user_text.strip()) < 10:
-            return user_text
+            return ""
 
         db_path = os.path.join(self.mw.project_path, ".vibecoder", "vector_db")
         if not os.path.exists(db_path):
-            return user_text
+            return ""
 
         try:
             db = VectorDatabase(self.mw.project_path)
             if db.collection.count() == 0:
-                return user_text
+                return ""
                 
             embed_provider, _ = EmbeddingFactory.get_provider("Gemini")
             self.mw.log_system("🔍 [RAG] Векторизация вопроса и поиск по кодовой базе...")
@@ -87,9 +87,9 @@ class AIController(QObject):
             results = db.search(query_vector, n_results=3)
             
             if not results:
-                return user_text
+                return ""
 
-            rag_context = "\n\n=== СИСТЕМНЫЙ КОНТЕКСТ ПРОЕКТА (RAG) ===\n"
+            rag_context = "=== СИСТЕМНЫЙ КОНТЕКСТ ПРОЕКТА (RAG) ===\n"
             rag_context += "Ниже представлены фрагменты кода из текущего проекта, которые семантически связаны с запросом пользователя.\n"
             rag_context += "Используй их для понимания архитектуры, но не меняй, если пользователь явно не просил.\n\n"
             
@@ -99,15 +99,14 @@ class AIController(QObject):
                 rag_context += f"--- Файл: {file_path} (Совпадение #{i+1}) ---\n"
                 rag_context += f"{marker}python\n{res['text']}\n{marker}\n\n"
 
-            self.mw.log_system(f"🧠 [RAG] Найдено {len(results)} релевантных фрагментов. Контекст добавлен.")
-            
-            return user_text + rag_context
+            self.mw.log_system(f"🧠 [RAG] Найдено {len(results)} релевантных фрагментов.")
+            return rag_context
 
         except Exception as e:
             self.mw.log_system(f"⚠️ Ошибка RAG-поиска: {str(e)}", color="#ffaa00")
-            return user_text
+            return ""
 
-    def send_task(self):
+    def send_task(self, is_coding_mode=True):
         import mimetypes
         user_text = self.mw.prompt_input.toPlainText().strip()
         if not user_text: return
@@ -118,16 +117,18 @@ class AIController(QObject):
         provider_id = engine_data.get("provider_id", "Browser")
         selected_model = engine_data.get("model", "")
         target_id = self.mw.get_current_target_id()
+        is_browser = (provider_id == "Browser")
         
         try:
             selected_tab = self.mw.status_bar.combo_tabs.currentText()
         except AttributeError:
             selected_tab = "Browser"
         
-        if provider_id == "Browser" and "🔴" in selected_tab:
+        if is_browser and "🔴" in selected_tab:
             self.mw.show_popup("Ошибка связи", "Нет активных вкладок браузера!", is_error=True)
             return
 
+        # 1. Подготовка изображений (физических)
         image_paths = list(self.mw.attachment_panel.get_attachments())
         image_payload = []
         if image_paths:
@@ -137,53 +138,124 @@ class AIController(QObject):
                 if not mime_type: mime_type = "image/jpeg"
                 image_payload.append({"mime": mime_type, "data": base64_img, "name": os.path.basename(path)})
 
-        self.mw.chat_logger.log("USER", user_text)
-        tab_display_name = selected_tab.split(" [")[0].replace("🟢 ", "") if provider_id == "Browser" else selected_model
-        media_notice = f" <i>(+ {len(image_paths)} картинки)</i>" if image_paths else ""
-        self.mw.chat_history.append(f"<br><span style='color: #569cd6;'><b>ВЫ</b> (в <i>{tab_display_name}</i>){media_notice}<b>:</b> {user_text}</span>")
+        # 2. Получение RAG контекста (ТОЛЬКО ДЛЯ РЕЖИМА КОДИНГА)
+        rag_context_str = ""
+        if is_coding_mode:
+            rag_context_str = self._get_rag_context_string(user_text)
+        else:
+            self.mw.log_system("💬 Режим чата: умный RAG-поиск отключен.")
 
-        enriched_text = self._enrich_with_rag_context(user_text)
-
-        if provider_id == "Browser":
-            import json
-            tools_schema = self.mcp_manager.get_tools_schema()
-            tools_instruction = (
-                "\n\n--- ДОСТУПНЫЕ ИНСТРУМЕНТЫ (MCP) ---\n"
-                "У тебя есть доступ к внешним инструментам (Context7, Поиск, БД).\n"
-                "АБСОЛЮТНЫЙ ПРИОРИТЕТ: Если тебе нужно вызвать инструмент, ВЕРНИ ТОЛЬКО ОДИН JSON в формате:\n"
-                '{"tool": "имя_инструмента", "args": {"ключ": "значение"}}\n'
-                "Ты можешь вызывать инструменты ПО ОЧЕРЕДИ несколько раз.\n"
-                "Список инструментов:\n" + json.dumps(tools_schema, ensure_ascii=False, indent=2)
-            )
-            enriched_text = tools_instruction + "\n\n" + enriched_text
-            self.browser_mcp_step = 0
-            
-        marker = '`' * 3
-        attached_blocks = []
+        # 3. Получение содержимого файлов из тегов (Работает всегда, если файл указан явно)
+        attached_blocks_text = []
         tags_in_text = re.findall(r'@\[.*?\]|@[\w\.\-\/\\]+', user_text)
         for tag in tags_in_text:
             fname = tag[1:].strip("[]")
             if fname in self.mw.attached_files:
                 content = self.mw.get_file_content_safe(fname)
-                if content: attached_blocks.append("### ФАЙЛ: " + fname + " ###\n" + marker + "\n" + content + "\n" + marker)
-        
-        final_prompt_text = enriched_text + ("\n\n[СИСТЕМНЫЙ БЛОК: ПРИКРЕПЛЕННЫЙ КОД]\n" + "\n\n".join(attached_blocks) + "\n[КОНЕЦ СИСТЕМНОГО БЛОКА]" if attached_blocks else "")
-        self.mw.last_full_prompt = self.orchestrator.format_request(user_prompt=final_prompt_text, project_path=self.mw.project_path, current_file_path=self.mw.current_file_path, file_content="")
-        
-        self.agent_trace.append({"title": "Исходный запрос", "content": self.mw.last_full_prompt})
-        self.mw.tokens_sent += self.estimate_tokens(self.mw.last_full_prompt)
-        self.mw.update_status_bar()
-        self.retry_count = 0 
-        self.mw.prompt_input.clear()
-        self.mw.attachment_panel.clear() 
-        
-        if provider_id == "Browser":
-            self.bridge.add_task(self.mw.last_full_prompt, is_relay=False, target_id=target_id, images=image_payload)
-            self.mw.log_system(f"Задача отправлена во вкладку '{tab_display_name}'. Ожидание ответа...")
-        else:
-            self.execute_api_task(provider_id, selected_model, image_paths)
+                if content:
+                    if is_browser:
+                        b64_content = base64.b64encode(content.encode('utf-8')).decode('utf-8')
+                        image_payload.append({"mime": "text/plain", "data": b64_content, "name": os.path.basename(fname)})
+                    else:
+                        marker = '`' * 3
+                        attached_blocks_text.append("### ФАЙЛ: " + fname + " ###\n" + marker + "\n" + content + "\n" + marker)
 
-    def execute_api_task(self, provider_id, selected_model, image_paths=None):
+        # Логирование в UI
+        self.mw.chat_logger.log("USER", user_text)
+        tab_display_name = selected_tab.split(" [")[0].replace("🟢 ", "") if is_browser else selected_model
+        media_notice = f" <i>(+ {len(image_paths)} картинки)</i>" if image_paths else ""
+        mode_notice = "⚡ Кодинг" if is_coding_mode else "💬 Чат"
+        self.mw.chat_history.append(f"<br><span style='color: #569cd6;'><b>ВЫ</b> [{mode_notice}] (в <i>{tab_display_name}</i>){media_notice}<b>:</b> {user_text}</span>")
+
+        if is_browser:
+            self.browser_mcp_step = 0
+            
+            # Собираем MCP инструменты (доступны в обоих режимах)
+            tools_instruction = ""
+            tools_schema = self.mcp_manager.get_tools_schema()
+            if tools_schema:
+                tools_instruction = (
+                    "--- ДОСТУПНЫЕ ИНСТРУМЕНТЫ (MCP) ---\n"
+                    "У тебя есть доступ к внешним инструменты (Context7, Поиск, БД).\n"
+                    "АБСОЛЮТНЫЙ ПРИОРИТЕТ: Если тебе нужно вызвать инструмент, ВЕРНИ ТОЛЬКО ОДИН JSON в формате:\n"
+                    '{"tool": "имя_инструмента", "args": {"ключ": "значение"}}\n'
+                    "Ты можешь вызывать инструменты ПО ОЧЕРЕДИ несколько раз.\n"
+                    "Список инструментов:\n" + json.dumps(tools_schema, ensure_ascii=False, indent=2) + "\n\n"
+                )
+
+            if is_coding_mode:
+                # ФОРМИРУЕМ ТЯЖЕЛЫЙ КОНТЕКСТ
+                system_rules = tools_instruction + self.orchestrator.system_prompt
+                b64_rules = base64.b64encode(system_rules.encode('utf-8')).decode('utf-8')
+                image_payload.append({"mime": "text/plain", "data": b64_rules, "name": "vibe_instructions.txt"})
+
+                if rag_context_str:
+                    b64_rag = base64.b64encode(rag_context_str.encode('utf-8')).decode('utf-8')
+                    image_payload.append({"mime": "text/plain", "data": b64_rag, "name": "rag_context.txt"})
+
+                state_text = self.orchestrator.format_request("", project_path=self.mw.project_path, current_file_path=self.mw.current_file_path, file_content="")
+                b64_state = base64.b64encode(state_text.encode('utf-8')).decode('utf-8')
+                image_payload.append({"mime": "text/plain", "data": b64_state, "name": "project_state.txt"})
+
+                final_prompt_text = user_text + "\n\n[СИСТЕМНОЕ НАПОМИНАНИЕ: Правила проекта, структура папок, код файлов и RAG-контекст прикреплены к этому сообщению в виде текстовых файлов. Обязательно прочитай vibe_instructions.txt перед ответом и отвечай СТРОГО в формате JSON Оркестратора. Не используй Markdown-заглушки.]"
+            else:
+                # ФОРМИРУЕМ ЛЕГКИЙ КОНТЕКСТ ДЛЯ БОЛТАЛКИ
+                chat_rules = tools_instruction + "Ты — умный AI-помощник разработчика. Отвечай на вопросы пользователя в свободном формате (Markdown). Пиши понятно, приводи примеры кода, если нужно. НИКАКИХ JSON-структур."
+                b64_rules = base64.b64encode(chat_rules.encode('utf-8')).decode('utf-8')
+                image_payload.append({"mime": "text/plain", "data": b64_rules, "name": "vibe_chat_rules.txt"})
+                
+                final_prompt_text = user_text + "\n\n[СИСТЕМНОЕ НАПОМИНАНИЕ: Мы находимся в режиме 'Чат'. Отвечай обычным текстом (Markdown), JSON-структура НЕ нужна. Прикрепленные файлы (если есть) нужны только для контекста вопроса.]"
+
+            self.mw.last_full_prompt = final_prompt_text
+            
+            self.agent_trace.append({"title": f"Исходный запрос ({mode_notice})", "content": final_prompt_text})
+            self.mw.tokens_sent += self.estimate_tokens(final_prompt_text)
+            self.mw.update_status_bar()
+            self.retry_count = 0 
+            self.mw.prompt_input.clear()
+            self.mw.attachment_panel.clear() 
+
+            self.bridge.add_task(self.mw.last_full_prompt, is_relay=False, target_id=target_id, images=image_payload)
+            self.mw.log_system(f"Задача отправлена во вкладку '{tab_display_name}'. Режим: {mode_notice}.")
+            
+        else:
+            # Логика для API
+            enriched_text = user_text
+            if tools_schema := self.mcp_manager.get_tools_schema():
+                tools_instruction = (
+                    "\n\n--- ДОСТУПНЫЕ ИНСТРУМЕНТЫ (MCP) ---\n"
+                    "У тебя есть доступ к внешним инструментам (Context7, Поиск, БД).\n"
+                    "АБСОЛЮТНЫЙ ПРИОРИТЕТ: Если тебе нужно вызвать инструмент, ВЕРНИ ТОЛЬКО ОДИН JSON в формате:\n"
+                    '{"tool": "имя_инструмента", "args": {"ключ": "значение"}}\n'
+                    "Список инструментов:\n" + json.dumps(tools_schema, ensure_ascii=False, indent=2)
+                )
+                enriched_text = tools_instruction + "\n\n" + enriched_text
+            
+            if rag_context_str:
+                enriched_text += "\n\n" + rag_context_str
+
+            final_prompt_text = enriched_text + ("\n\n[СИСТЕМНЫЙ БЛОК: ПРИКРЕПЛЕННЫЙ КОД]\n" + "\n\n".join(attached_blocks_text) + "\n[КОНЕЦ СИСТЕМНОГО БЛОКА]" if attached_blocks_text else "")
+            
+            if is_coding_mode:
+                self.mw.last_full_prompt = self.orchestrator.format_request(user_prompt=final_prompt_text, project_path=self.mw.project_path, current_file_path=self.mw.current_file_path, file_content="")
+                active_sys_prompt = self.orchestrator.system_prompt
+            else:
+                self.mw.last_full_prompt = final_prompt_text
+                active_sys_prompt = "Ты — умный AI-помощник разработчика. Отвечай на вопросы пользователя в свободном формате (Markdown). Пиши понятно, приводи примеры кода, если нужно."
+            
+            self.agent_trace.append({"title": f"Исходный запрос API ({mode_notice})", "content": self.mw.last_full_prompt})
+            self.mw.tokens_sent += self.estimate_tokens(self.mw.last_full_prompt)
+            self.mw.update_status_bar()
+            self.retry_count = 0 
+            self.mw.prompt_input.clear()
+            self.mw.attachment_panel.clear() 
+
+            self.execute_api_task(provider_id, selected_model, image_paths, active_sys_prompt)
+
+    def execute_api_task(self, provider_id, selected_model, image_paths=None, sys_prompt=""):
+        if not sys_prompt:
+            sys_prompt = self.orchestrator.system_prompt
+            
         settings = QSettings("VibeCoder", "API_Config")
         provider = None
         try:
@@ -212,7 +284,7 @@ class AIController(QObject):
                 original_generate = provider.generate
                 provider.generate = lambda p, sp: original_generate(p, sp, model=selected_model, image_paths=image_paths)
                 
-                self.worker = APIWorker(provider, self.mw.last_full_prompt, self.orchestrator.system_prompt, mcp_manager=self.mcp_manager)
+                self.worker = APIWorker(provider, self.mw.last_full_prompt, sys_prompt, mcp_manager=self.mcp_manager)
                 self.worker.finished_signal.connect(self.process_ai_response)
                 self.worker.error_signal.connect(lambda err: self.mw.log_system(f"ОШИБКА API: {err}", color="#ff4444", is_bold=True))
                 self.worker.log_signal.connect(lambda msg: self.mw.log_system(msg))
@@ -226,31 +298,41 @@ class AIController(QObject):
         if len(diff_text) > 10000:
             diff_text = diff_text[:10000] + "\n...[DIFF СЛИШКОМ БОЛЬШОЙ, ОБРЕЗАН]..."
 
+        engine_data = self.mw.get_selected_engine_data()
+        is_browser = engine_data.get("provider_id", "Browser") == "Browser"
+
         marker = '`' * 3
+        
+        # Исправление: код diff теперь передается прямо внутри текстового промпта.
         prompt = (
-            "Сгенерируй короткое, профессиональное сообщение для Git коммита на основе этого Diff кода:\n\n"
-            f"{marker}diff\n{diff_text}\n{marker}\n\n"
-            "Выдай ТОЛЬКО текст коммита обычным текстом (Markdown). "
-            "НЕ ИСПОЛЬЗУЙ JSON! Пиши на русском языке, используй общепринятые префиксы (feat:, fix:, refactor:)."
+            "Сгенерируй короткое, профессиональное сообщение для Git коммита на основе предоставленного Diff кода.\n"
+            "Выдай ТОЛЬКО текст коммита обычным текстом (Markdown). НЕ ИСПОЛЬЗУЙ JSON! Пиши на русском языке, используй общепринятые префиксы (feat:, fix:, refactor:).\n\n"
+            f"=== DIFF КОД ===\n{marker}diff\n{diff_text}\n{marker}\n"
         )
 
         self.mw.log_system("Запрос ИИ-коммита...")
         self.mw.chat_history.append(f"<br><span style='color: #673ab7;'><b>[СИСТЕМА] Отправка diff для генерации ИИ-коммита...</b></span>")
         self.mw.scroll_chat()
 
-        self.mw.last_full_prompt = self.orchestrator.format_request(
-            user_prompt=prompt, project_path=self.mw.project_path, current_file_path=None, file_content=""
-        )
-
-        self.mw.tokens_sent += self.estimate_tokens(self.mw.last_full_prompt)
-        self.mw.update_status_bar()
-        self.retry_count = 0
-
-        engine_data = self.mw.get_selected_engine_data()
-        if engine_data.get("provider_id") == "Browser":
+        if is_browser:
+            self.mw.last_full_prompt = prompt
+            
+            self.mw.tokens_sent += self.estimate_tokens(self.mw.last_full_prompt)
+            self.mw.update_status_bar()
+            self.retry_count = 0
+            
+            # Отправляем ПРОСТО текст, без виртуальных файлов (images=None)
             self.bridge.add_task(self.mw.last_full_prompt, target_id=self.mw.get_current_target_id())
         else:
-            self.execute_api_task(engine_data.get("provider_id"), engine_data.get("model"))
+            self.mw.last_full_prompt = self.orchestrator.format_request(
+                user_prompt=prompt, 
+                project_path=self.mw.project_path, current_file_path=None, file_content=""
+            )
+            self.mw.tokens_sent += self.estimate_tokens(self.mw.last_full_prompt)
+            self.mw.update_status_bar()
+            self.retry_count = 0
+            sys_prompt = "Ты — профессиональный программист, генерирующий идеальные коммиты."
+            self.execute_api_task(engine_data.get("provider_id"), engine_data.get("model"), sys_prompt=sys_prompt)
 
     def force_relay(self):
         self.is_waiting_for_relay_msg = True
@@ -282,37 +364,51 @@ class AIController(QObject):
         if engine_data.get("provider_id") == "Browser":
             self.bridge.add_task(self.mw.last_full_prompt, target_id=self.mw.get_current_target_id())
         else:
-            self.execute_api_task(engine_data.get("provider_id"), engine_data.get("model"))
+            self.execute_api_task(engine_data.get("provider_id"), engine_data.get("model"), sys_prompt="Ты — координатор проекта. Формируй брифы четко.")
 
     def send_requested_files(self, file_paths):
-        marker = '`' * 3
-        attached_blocks = []
-        for path in file_paths:
-            content = self.mw.get_file_content_safe(path)
-            if content: 
-                attached_blocks.append("### ФАЙЛ: " + path + " ###\n" + marker + "\n" + content + "\n" + marker)
-            else:
-                attached_blocks.append("### ФАЙЛ: " + path + " ###\n[ФАЙЛ НЕ НАЙДЕН ИЛИ ПУСТ]")
-        
-        system_text = "[СИСТЕМНОЕ СООБЩЕНИЕ: ПОЛЬЗОВАТЕЛЬ ПРЕДОСТАВИЛ ЗАПРОШЕННЫЕ ФАЙЛЫ]\n\n" + "\n\n".join(attached_blocks) + "\n\nПроанализируй их и выполни предыдущую задачу."
-        
+        engine_data = self.mw.get_selected_engine_data()
+        is_browser = engine_data.get("provider_id", "Browser") == "Browser"
+
         self.mw.chat_logger.log("SYSTEM", f"Авто-отправка файлов: {', '.join(file_paths)}")
         self.mw.chat_history.append(f"<br><div style='color: #858585; font-size: 13px; margin-left: 10px;'>[СИСТЕМА] Автоматически отправлены: {', '.join(file_paths)}</div>")
         self.mw.scroll_chat()
-        
-        self.mw.last_full_prompt = self.orchestrator.format_request(
-            user_prompt=system_text, project_path=self.mw.project_path, current_file_path=self.mw.current_file_path, file_content=""
-        )
-        
-        self.mw.tokens_sent += self.estimate_tokens(self.mw.last_full_prompt)
-        self.mw.update_status_bar()
-        self.retry_count = 0 
-        
-        engine_data = self.mw.get_selected_engine_data()
-        if engine_data.get("provider_id") == "Browser":
-            self.bridge.add_task(self.mw.last_full_prompt, target_id=self.mw.get_current_target_id())
-            self.mw.log_system("Файлы отправлены. Ожидание ответа...")
+
+        if is_browser:
+            image_payload = []
+            for path in file_paths:
+                content = self.mw.get_file_content_safe(path)
+                if content:
+                    b64_data = base64.b64encode(content.encode('utf-8')).decode('utf-8')
+                    image_payload.append({"mime": "text/plain", "data": b64_data, "name": os.path.basename(path)})
+
+            system_text = "[СИСТЕМНОЕ СООБЩЕНИЕ]\nПользователь предоставил запрошенные файлы. Они прикреплены к этому сообщению.\nПроанализируй их и выполни предыдущую задачу. Не забывай отвечать в формате JSON Оркестратора."
+            self.mw.last_full_prompt = system_text
+
+            self.mw.tokens_sent += self.estimate_tokens(self.mw.last_full_prompt)
+            self.mw.update_status_bar()
+            self.retry_count = 0
+
+            self.bridge.add_task(self.mw.last_full_prompt, target_id=self.mw.get_current_target_id(), images=image_payload)
+            self.mw.log_system("Файлы отправлены как вложения. Ожидание ответа...")
         else:
+            marker = '`' * 3
+            attached_blocks = []
+            for path in file_paths:
+                content = self.mw.get_file_content_safe(path)
+                if content: 
+                    attached_blocks.append("### ФАЙЛ: " + path + " ###\n" + marker + "\n" + content + "\n" + marker)
+                else:
+                    attached_blocks.append("### ФАЙЛ: " + path + " ###\n[ФАЙЛ НЕ НАЙДЕН ИЛИ ПУСТ]")
+            
+            system_text = "[СИСТЕМНОЕ СООБЩЕНИЕ: ПОЛЬЗОВАТЕЛЬ ПРЕДОСТАВИЛ ЗАПРОШЕННЫЕ ФАЙЛЫ]\n\n" + "\n\n".join(attached_blocks) + "\n\nПроанализируй их и выполни предыдущую задачу."
+            
+            self.mw.last_full_prompt = self.orchestrator.format_request(
+                user_prompt=system_text, project_path=self.mw.project_path, current_file_path=self.mw.current_file_path, file_content=""
+            )
+            self.mw.tokens_sent += self.estimate_tokens(self.mw.last_full_prompt)
+            self.mw.update_status_bar()
+            self.retry_count = 0 
             self.execute_api_task(engine_data.get("provider_id"), engine_data.get("model"))
 
     def process_limit_reached(self):
@@ -374,23 +470,16 @@ class AIController(QObject):
 
         def code_replacer(match):
             lang = match.group(1).strip()
-            # Убираем лишний мусор из названия языка
             lang = lang.split('\n')[0].strip()
             code = match.group(2).strip('\n') 
             header = f"<div style='background-color: #2d2d2d; color: #858585; padding: 4px 10px; font-size: 11px; font-weight: bold; border-top-left-radius: 5px; border-top-right-radius: 5px;'>{lang.upper() if lang else 'CODE'}</div>"
             body = f"<pre style='margin: 0; padding: 10px; color: #d4d4d4; font-family: Consolas, monospace; font-size: 13px; white-space: pre-wrap;'>{code}</pre>"
             return f"</div><div style='background-color: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 5px; margin: 10px 0;'>{header}{body}</div><div style='color: #d4d4d4; line-height: 1.5;'>"
 
-        # Ловим стандартные тройные кавычки Markdown (благодаря новому content.js они дойдут сюда)
         text = re.sub(r'`{3}(.*?)\n(.*?)`{3}', code_replacer, text, flags=re.DOTALL)
-        
-        # Инлайн код
         text = re.sub(r'`(.*?)`', r"<code style='background-color: #3c3c3c; color: #ce9178; padding: 2px 5px; border-radius: 4px; font-family: Consolas, monospace;'>\1</code>", text)
-
-        # Жирный текст
         text = re.sub(r'\*\*(.*?)\*\*', r"<b style='color: #ffffff;'>\1</b>", text)
 
-        # Переносы строк
         parts = re.split(r'(<pre.*?</pre>)', text, flags=re.DOTALL)
         for i in range(len(parts)):
             if not parts[i].startswith('<pre'):
@@ -399,7 +488,6 @@ class AIController(QObject):
         return "".join(parts)
 
     def process_ai_response(self, raw_text):
-        # --- НОВЫЙ БЛОК ПЕРЕХВАТА ЛИМИТОВ ИЗ ТЕКСТА ---
         if "You've reached your Pro model limit" in raw_text or "Limit resets" in raw_text:
             self.process_limit_reached()
             return
@@ -467,6 +555,7 @@ class AIController(QObject):
         engine_data = self.mw.get_selected_engine_data()
         is_browser = engine_data.get("provider_id", "Browser") == "Browser"
         
+        # Обработка MCP-вызовов (оставлена для обоих режимов на случай, если в чате потребуется поиск)
         if is_browser and command and isinstance(command, dict) and "tool" in command and "updates" not in command:
             tool_name = command.get("tool")
             args = command.get("args", {})
@@ -483,7 +572,7 @@ class AIController(QObject):
                 
             tool_result = self.mcp_manager.execute_tool(tool_name, args)
             next_prompt = (f"Результат выполнения '{tool_name}':\n---\n{tool_result}\n---\n\n"
-                           f"Если информации достаточно, дай финальный ответ СТРОГО в формате Оркестратора.")
+                           f"Если информации достаточно, дай финальный ответ.")
             
             self.agent_trace.append({"title": f"Результат '{tool_name}'", "content": next_prompt})
             
@@ -493,13 +582,20 @@ class AIController(QObject):
             self.bridge.add_task(next_prompt, target_id=self.mw.get_current_target_id())
             return
 
-        self.mw.log_system("Финальный ответ получен. Патчинг...")
+        # Парсинг ответа
         result = self.orchestrator.parse_and_validate_response(raw_text)
         
         if result["status"] == "error":
+            # Если сломался JSON, но мы находимся в режиме болталки, то просто выводим текст
+            if "\"updates\": [" not in raw_text and "\"create_files\": [" not in raw_text:
+                formatted_thoughts = self._markdown_to_html(raw_text.strip())
+                self.mw.chat_history.append(f"<div style='margin-top: 10px; margin-bottom: 10px;'><b style='color: #31a24c;'>[ОТВЕТ ИИ]:</b><br>{formatted_thoughts}</div>")
+                self.mw.scroll_chat()
+                return
+
             self.retry_count += 1
             if self.retry_count > 2:
-                self.mw.log_system("ИИ не смог выдать код. Включена АВТО-ПАУЗА.", color="#ff4444", is_bold=True)
+                self.mw.log_system("ИИ не смог выдать правильный JSON. Включена АВТО-ПАУЗА.", color="#ff4444", is_bold=True)
                 if not self.mw.btn_pause.isChecked():
                     self.mw.btn_pause.setChecked(True)
                     self.mw.toggle_pause()
@@ -513,9 +609,8 @@ class AIController(QObject):
                 "🚨 ГЛАВНАЯ ПРИЧИНА: Ты используешь неэкранированные двойные кавычки внутри JSON-строки.\n"
                 "Например, ты генерируешь: \"replace\": \" \"use server\"; \"\n"
                 "Для парсера это выглядит как конец строки после слова replace, а дальше идет мусор, что ломает весь JSON.\n\n"
-                "ПРАВИЛО: Внутри полей 'code', 'search' и 'replace' используй ТОЛЬКО одинарные кавычки (') для строк, импортов и HTML-атрибутов (например, className='flex'). Либо тщательно экранируй двойные (\\\").\n\n"
-                "Исправь свой код (замени \" на ') и пришли валидный чистый JSON для этой задачи:\n"
-                f"{self.mw.last_full_prompt}\n"
+                "ПРАВИЛО: Внутри полей 'code', 'search' и 'replace' используй ТОЛЬКО одинарные кавычки (') для строк, импортов и HTML-атрибутов. Либо тщательно экранируй двойные (\\\").\n\n"
+                "Исправь свой код (замени \" на ') и пришли валидный чистый JSON."
             )
             
             self.agent_trace.append({
@@ -523,7 +618,6 @@ class AIController(QObject):
                 "content": fix_prompt
             })
             
-            engine_data = self.mw.get_selected_engine_data()
             if engine_data.get("provider_id") == "Browser":
                 self.bridge.add_task(fix_prompt, target_id=self.mw.get_current_target_id())
             else:

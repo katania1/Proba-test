@@ -119,7 +119,8 @@ class MainWindow(QMainWindow):
         input_layout.setSpacing(2)
         
         self.prompt_input = VibeTextEdit()
-        self.prompt_input.setPlaceholderText("Напишите задание (Отправка: Ctrl+Enter)...")
+        # Обновленный плейсхолдер под новую логику кнопок
+        self.prompt_input.setPlaceholderText("Напишите задание (Enter - Спросить, Ctrl+Enter - Кодить)...")
         self.prompt_input.setStyleSheet("background-color: transparent; border: none; color: #d4d4d4;")
         self.prompt_input.tag_action_signal.connect(self.handle_tag_action)
         self.prompt_input.project_path = self.project_path
@@ -138,40 +139,61 @@ class MainWindow(QMainWindow):
         action_layout = QHBoxLayout()
         action_layout.setContentsMargins(5, 0, 5, 5)
         
-        btn_action_style = "color: white; font-weight: bold; border-radius: 3px; padding: 2px 10px; font-size: 11px; margin-left: 5px;"
+        # --- ГЕНЕРАТОР СТИЛЕЙ С ПОДДЕРЖКОЙ ВИЗУАЛЬНОГО НАЖАТИЯ (:pressed) ---
+        def get_btn_style(bg, hover, pressed, color="white", border="none"):
+            return f"""
+                QPushButton {{ background-color: {bg}; color: {color}; border: {border}; font-weight: bold; border-radius: 3px; padding: 4px 12px; font-size: 11px; margin-left: 5px; }}
+                QPushButton:hover {{ background-color: {hover}; }}
+                QPushButton:pressed {{ background-color: {pressed}; }}
+            """
 
         self.btn_inspector = QPushButton("🐞 Инспектор")
-        self.btn_inspector.setFixedHeight(24)
-        self.btn_inspector.setMinimumWidth(80) # Мягкий предел сжатия
-        self.btn_inspector.setStyleSheet(f"background-color: #005f73; {btn_action_style}")
+        self.btn_inspector.setFixedHeight(26)
+        self.btn_inspector.setMinimumWidth(80)
+        self.btn_inspector.setStyleSheet(get_btn_style("#005f73", "#007891", "#00404d"))
         self.btn_inspector.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
         self.btn_inspector.clicked.connect(self.open_inspector)
 
         self.btn_approve = QPushButton("✅ Утвердить код")
-        self.btn_approve.setFixedHeight(24)
+        self.btn_approve.setFixedHeight(26)
         self.btn_approve.setMinimumWidth(100)
-        self.btn_approve.setStyleSheet(f"background-color: #2e7d32; {btn_action_style}")
+        self.btn_approve.setStyleSheet(get_btn_style("#2e7d32", "#388e3c", "#1b5e20"))
         self.btn_approve.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
         
         self.btn_reject_main = QPushButton("❌ Отклонить")
-        self.btn_reject_main.setFixedHeight(24)
+        self.btn_reject_main.setFixedHeight(26)
         self.btn_reject_main.setMinimumWidth(80)
-        self.btn_reject_main.setStyleSheet(f"background-color: #512525; {btn_action_style}")
+        self.btn_reject_main.setStyleSheet(get_btn_style("#512525", "#6b2f2f", "#3a1919"))
         self.btn_reject_main.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
         self.btn_reject_main.setVisible(False)
 
+        # У кнопки Пауза сложный стиль из-за Checkable-состояния
         self.btn_pause = QPushButton("■ Пауза")
         self.btn_pause.setCheckable(True)
-        self.btn_pause.setFixedHeight(24)
+        self.btn_pause.setFixedHeight(26)
         self.btn_pause.setMinimumWidth(70)
-        self.btn_pause.setStyleSheet(f"background-color: #d32f2f; {btn_action_style}")
+        self.btn_pause.setStyleSheet("""
+            QPushButton { background-color: #d32f2f; color: white; border: none; font-weight: bold; border-radius: 3px; padding: 4px 12px; font-size: 11px; margin-left: 5px; }
+            QPushButton:hover { background-color: #e53935; }
+            QPushButton:pressed { background-color: #b71c1c; }
+            QPushButton:checked { background-color: #31a24c; }
+            QPushButton:checked:hover { background-color: #38b056; }
+            QPushButton:checked:pressed { background-color: #247a38; }
+        """)
         self.btn_pause.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
 
-        self.btn_send = QPushButton("➤ Отправить")
-        self.btn_send.setFixedHeight(24)
-        self.btn_send.setMinimumWidth(80)
-        self.btn_send.setStyleSheet(f"background-color: #b58900; color: #1e1e1e; {btn_action_style.replace('color: white;', '')}")
-        self.btn_send.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
+        # --- НОВЫЕ КНОПКИ УПРАВЛЕНИЯ КОНТЕКСТОМ ---
+        self.btn_chat = QPushButton("💬 Спросить")
+        self.btn_chat.setFixedHeight(26)
+        self.btn_chat.setMinimumWidth(80)
+        self.btn_chat.setStyleSheet(get_btn_style("transparent", "rgba(86, 156, 214, 0.1)", "rgba(86, 156, 214, 0.25)", color="#569cd6", border="1px solid #569cd6"))
+        self.btn_chat.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
+
+        self.btn_code = QPushButton("⚡ Кодить")
+        self.btn_code.setFixedHeight(26)
+        self.btn_code.setMinimumWidth(80)
+        self.btn_code.setStyleSheet(get_btn_style("#0e639c", "#1177bb", "#094771"))
+        self.btn_code.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
 
         # 1. Сначала Инспектор
         action_layout.addWidget(self.btn_inspector)
@@ -179,11 +201,14 @@ class MainWindow(QMainWindow):
         # 2. Пружина (Прижимает Инспектор влево, остальные вправо)
         action_layout.addStretch()
         
-        # 3. Остальные кнопки (Утвердить и Отправить поменяли местами)
+        # 3. Остальные кнопки
         action_layout.addWidget(self.btn_approve)
         action_layout.addWidget(self.btn_reject_main)
         action_layout.addWidget(self.btn_pause)
-        action_layout.addWidget(self.btn_send)
+        
+        # Добавляем новые кнопки отправки
+        action_layout.addWidget(self.btn_chat)
+        action_layout.addWidget(self.btn_code)
 
         input_layout.addLayout(action_layout)
         
@@ -266,8 +291,13 @@ class MainWindow(QMainWindow):
             self.ai_controller.mcp_manager.error_message
         )
         
-        self.btn_send.clicked.connect(self.ai_controller.send_task)
-        self.prompt_input.send_signal.connect(self.ai_controller.send_task)
+        # Привязка новых кнопок к методу с передачей флага режима работы
+        self.btn_chat.clicked.connect(lambda: self.ai_controller.send_task(is_coding_mode=False))
+        self.btn_code.clicked.connect(lambda: self.ai_controller.send_task(is_coding_mode=True))
+        
+        # Если сигнал приходит от горячей клавиши Ctrl+Enter из VibeTextEdit
+        self.prompt_input.send_signal.connect(lambda: self.ai_controller.send_task(is_coding_mode=True))
+        
         self.btn_relay.clicked.connect(self.ai_controller.force_relay)
 
         self._check_project_environment()
@@ -523,12 +553,12 @@ class MainWindow(QMainWindow):
         if self.btn_pause.isChecked():
             self.ai_controller.bridge.is_paused = True
             self.btn_pause.setText("▶ Продолжить")
-            self.btn_pause.setStyleSheet("background-color: #31a24c; color: white; font-weight: bold; border-radius: 3px; padding: 2px 10px; font-size: 11px; margin-left: 5px;")
+            self.btn_pause.setStyleSheet("background-color: #31a24c; color: white; font-weight: bold; border-radius: 3px; padding: 4px 12px; font-size: 11px; margin-left: 5px;")
             self.log_system("⏸ РАБОТА ПРИОСТАНОВЛЕНА", color="#ffaa00", is_bold=True)
         else:
             self.ai_controller.bridge.is_paused = False
             self.btn_pause.setText("■ Пауза")
-            self.btn_pause.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold; border-radius: 3px; padding: 2px 10px; font-size: 11px; margin-left: 5px;")
+            self.btn_pause.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold; border-radius: 3px; padding: 4px 12px; font-size: 11px; margin-left: 5px;")
             self.log_system("▶ РАБОТА ВОЗОБНОВЛЕНА", color="#31a24c", is_bold=True)
 
     def show_history(self):
@@ -576,4 +606,5 @@ class MainWindow(QMainWindow):
         else:
             self.log_system("🩺 Терминал поймал ошибку, но файл не найден. Промпт сформирован.", color="#d32f2f", is_bold=True)
 
-        self.btn_send.click()
+        # Теперь автоисправление ошибки вызывает "тяжелый" запрос (Кодить)
+        self.btn_code.click()

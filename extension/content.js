@@ -1,5 +1,5 @@
 /**
- * 📖 БИБЛИЯ ПРОЕКТА: CONTENT.JS (v2.9.14 - FULL UNCOMPRESSED & REVERSE-ENGINEERING)
+ * 📖 БИБЛИЯ ПРОЕКТА: CONTENT.JS (v3.0 - VIRTUAL FILE SYSTEM & DOUBLE-TAP INJECTION)
  */
 
 let myTabId = sessionStorage.getItem('vc_tab_id');
@@ -191,7 +191,6 @@ async function triggerLimitReached(reason) {
 async function checkGeminiAlerts() {
     if (window.ignoreLimitsSession) return false;
 
-    // Прямой поиск по всему тексту (самый надежный вариант для новых интерфейсов)
     const bodyText = (document.body.innerText || "").toLowerCase();
     if (bodyText.includes("you've reached your pro model limit") || 
         bodyText.includes("limit resets on") ||
@@ -200,7 +199,6 @@ async function checkGeminiAlerts() {
         return true;
     }
 
-    // Резервный поиск по элементам ошибок
     const alerts = document.querySelectorAll('snack-bar, .error-message, [role="alert"], .limit-message');
     for (let el of alerts) {
         const t = (el.innerText || "").toLowerCase();
@@ -286,11 +284,9 @@ function base64ToFile(base64Data, mimeType, filename) {
     return new File([blob], filename, { type: mimeType });
 }
 
-// --- НОВАЯ МАГИЯ: Извлекает текст, восстанавливая блоки кода ---
 function extractGeminiText(element) {
     let clone = element.cloneNode(true);
     
-    // Создаем невидимый контейнер, чтобы innerText отработал правильно
     let container = document.createElement('div');
     Object.assign(container.style, {
         position: 'absolute', left: '-9999px', top: '0', visibility: 'hidden', display: 'block'
@@ -298,16 +294,13 @@ function extractGeminiText(element) {
     container.appendChild(clone);
     document.body.appendChild(container);
 
-    // Удаляем кнопки "Копировать", чтобы они не попадали в наш текст
     clone.querySelectorAll('button, .copy-button, [aria-label*="Copy"]').forEach(btn => btn.remove());
 
-    // Ищем все блоки с кодом и возвращаем им Markdown-формат
     let pres = clone.querySelectorAll('pre');
     pres.forEach(pre => {
         let code = pre.innerText || pre.textContent;
         let lang = '';
         
-        // Пытаемся найти название языка (Gemini обычно пишет его над кодом)
         let wrapper = pre.closest('.code-block, code-block, [class*="code"]');
         if (wrapper) {
             let header = wrapper.querySelector('.language-name, [class*="header"], span');
@@ -334,7 +327,6 @@ async function checkServer() {
             updatePanelUI(true, false);
             return; 
         } else {
-            // Если была пауза из-за лимитов, а теперь паузы нет - юзер нажал "Продолжить"
             if (isSystemPaused && isLimitReached) {
                 console.log("VibeCoder: Пауза снята сервером! Пользователь решил продолжить на Flash.");
                 window.ignoreLimitsSession = true;
@@ -360,6 +352,7 @@ async function checkServer() {
             }
             
             lastProcessedText = ""; currentCandidateText = ""; stableCount = 0;
+            // task.images теперь содержит и реальные картинки, и наши виртуальные файлы с кодом
             await sendToGemini(task.prompt, task.images);
             return;
         }
@@ -383,8 +376,6 @@ async function checkServer() {
         const modelResponses = document.querySelectorAll(['message-content', '.model-response-text', '[data-message-author-role="model"]'].join(', '));
         if (modelResponses.length > 0) {
             const lastResponse = modelResponses[modelResponses.length - 1];
-            
-            // --- ИСПОЛЬЗУЕМ НАШ НОВЫЙ ЭКСТРАКТОР HTML -> MARKDOWN ---
             let text = extractGeminiText(lastResponse);
             
             if (text && text.trim() !== "") {
@@ -415,7 +406,7 @@ async function checkServer() {
     }
 }
 
-async function sendToGemini(text, images = []) {
+async function sendToGemini(text, filesPayload = []) {
     if (!await ensureProMode()) { 
         isProcessing = false; 
         return; 
@@ -426,25 +417,33 @@ async function sendToGemini(text, images = []) {
     
     inputArea.focus();
 
-    if (images && images.length > 0) {
+    if (filesPayload && filesPayload.length > 0) {
         try {
-            const files = images.map(img => base64ToFile(img.data, img.mime, img.name));
+            const files = filesPayload.map(fileObj => base64ToFile(fileObj.data, fileObj.mime, fileObj.name));
             const dt = new DataTransfer();
             files.forEach(f => dt.items.add(f));
             
-            const pasteEvent = new ClipboardEvent('paste', {
-                clipboardData: dt,
-                bubbles: true,
-                cancelable: true
-            });
+            // 1. Попытка нативной инъекции файлов через скрытый input (Идеальный вариант для .txt/.py)
+            const fileInput = document.querySelector('input[type="file"]');
+            if (fileInput) {
+                console.log("VibeCoder: Найден нативный input[type=file]. Инжектируем виртуальные файлы...");
+                fileInput.files = dt.files;
+                fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+            } else {
+                // 2. Хак с перехватом события paste для Chrome
+                console.log("VibeCoder: Нативный input не найден. Используем хак ClipboardEvent...");
+                const pasteEvent = new ClipboardEvent('paste', { bubbles: true, cancelable: true });
+                // Жесткое переопределение свойства, которое Chrome пытается игнорировать
+                Object.defineProperty(pasteEvent, 'clipboardData', { value: dt });
+                inputArea.dispatchEvent(pasteEvent);
+            }
             
-            inputArea.dispatchEvent(pasteEvent);
-            console.log("VibeCoder: Картинки вставлены. Ожидание асинхронной загрузки сервером...");
-            
-            await new Promise(r => setTimeout(r, 500));
+            console.log("VibeCoder: Файлы переданы в DOM. Ожидание асинхронной загрузки сервером Google...");
+            await new Promise(r => setTimeout(r, 800));
             
             let retries = 0;
-            while (retries < 20) { 
+            // Увеличили цикл ожидания: файлы RAG могут весить больше обычных картинок
+            while (retries < 30) { 
                 await new Promise(r => setTimeout(r, 500));
                 
                 const spinners = document.querySelectorAll('mat-progress-spinner, .gmat-mdc-progress-spinner, [aria-label="Loading"]');
@@ -454,13 +453,13 @@ async function sendToGemini(text, images = []) {
                 }) || document.querySelector('[data-testid="send-button"], .send-button');
 
                 if (spinners.length === 0 && sendBtn && !sendBtn.disabled) {
-                    console.log("VibeCoder: Загрузка картинок завершена, интерфейс готов.");
+                    console.log("VibeCoder: Загрузка файлов на сервера Gemini успешно завершена.");
                     break;
                 }
                 retries++;
             }
         } catch (err) {
-            console.error("VibeCoder: Ошибка при вставке картинок", err);
+            console.error("VibeCoder: Ошибка при инъекции файлов в интерфейс:", err);
         }
     }
 
@@ -479,7 +478,7 @@ async function sendToGemini(text, images = []) {
         if (sendBtn && !sendBtn.disabled) {
             sendBtn.click();
         } else {
-            console.warn("VibeCoder: Кнопка отправки недоступна. Возможен тайм-аут загрузки.");
+            console.warn("VibeCoder: Кнопка отправки недоступна. Возможен тайм-аут загрузки файлов.");
         }
         setTimeout(() => { isProcessing = false; stableCount = 0; }, 2000);
     }, 500);

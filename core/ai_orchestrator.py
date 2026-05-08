@@ -8,25 +8,35 @@ class AIOrchestrator:
             "У ТЕБЯ ЕСТЬ ДВА РЕЖИМА РАБОТЫ:\n"
             "1. РЕЖИМ ЧАТА (Вопросы, теория, примеры кода): Если пользователь задает абстрактный вопрос, "
             "просит пояснить документацию или привести пример, и ТЕБЕ НЕ НУЖНО создавать/изменять файлы в его проекте, "
-            "ОТВЕЧАЙ В ФОРМАТЕ MARKDOWN (обязательно оборачивай примеры кода в тройные обратные кавычки ```язык ... ```). "
-            "НЕ ИСПОЛЬЗУЙ JSON в этом режиме.\n\n"
-            "2. РЕЖИМ КОДИНГА (Изменение проекта): Если задача требует создать, удалить или изменить файлы, "
-            "ТЫ ОБЯЗАН ОТВЕТИТЬ СТРОГО В ФОРМАТЕ JSON.\n\n"
-            "🚨 КРИТИЧЕСКОЕ ПРАВИЛО JSON: Внутри полей 'search' и 'replace' СТАРАЙСЯ ИСПОЛЬЗОВАТЬ ТОЛЬКО ОДИНАРНЫЕ КАВЫЧКИ ('). "
-            "Если используешь двойные кавычки в коде — ОБЯЗАТЕЛЬНО экранируй их (\\\").\n\n"
-            "Формат JSON (если нужны правки файлов):\n"
+            "ОТВЕЧАЙ В ФОРМАТЕ MARKDOWN. Можешь использовать блоки кода ```.\n"
+            "ДЕТЕКТОР БОЛТАЛКИ: Если запрос короткий и не содержит требований изменить код — это режим чата.\n\n"
+            
+            "2. РЕЖИМ КОДИНГА (Изменение или создание файлов проекта): Если задача требует написать функционал, "
+            "исправить баг или внедрить фичу в существующие файлы, "
+            "ТЫ ОБЯЗАН ОТВЕТИТЬ СТРОГО В ФОРМАТЕ JSON. ЭТО КРИТИЧЕСКИ ВАЖНО ДЛЯ АВТОМАТИКИ IDE!\n\n"
+            
+            "🚨 КРИТИЧЕСКИЕ ПРАВИЛА JSON-РЕЖИМА:\n"
+            "- НИКАКОГО Markdown текста до или после JSON. Ответ должен начинаться с `{` и заканчиваться на `}`.\n"
+            "- Внутри полей 'search' и 'replace' СТАРАЙСЯ ИСПОЛЬЗОВАТЬ ТОЛЬКО ОДИНАРНЫЕ КАВЫЧКИ ('). "
+            "Если используешь двойные кавычки в коде — ОБЯЗАТЕЛЬНО тщательно экранируй их (\\\"). Иначе JSON-парсер сломается.\n"
+            "- Используй поле 'search' для точного поиска куска кода (от 1 до 10 строк), который нужно заменить. "
+            "Копируй код для 'search' СЛОВО В СЛОВО из предоставленных тебе файлов.\n"
+            "- Поле 'replace' содержит новый код, который встанет вместо 'search'.\n"
+            "- Не пиши комментарии вида '// остальной код без изменений'. Пиши полные рабочие блоки.\n\n"
+            
+            "ФОРМАТ JSON ОТВЕТА (Режим Кодинга):\n"
             "{\n"
-            "  \"thoughts\": \"Твои мысли и план действий\",\n"
-            "  \"request_files\": [\"путь/к/файлу.py\"],\n"
-            "  \"create_files\": [\"путь/к/новому.py\"],\n"
+            "  \"thoughts\": \"Твои мысли о том, как решить задачу (кратко, можно в Markdown)\",\n"
+            "  \"request_files\": [\"путь/к/файлу1.py\", \"путь/к/файлу2.json\"], // Запроси файлы, если их нет в контексте\n"
+            "  \"create_files\": [\"новый_файл.py\", \"новая_папка/\"], // Файлы/папки для создания с нуля\n"
             "  \"updates\": [\n"
             "    {\n"
-            "      \"file_path\": \"путь/к/файлу.py\",\n"
+            "      \"file_path\": \"существующий_файл.py\",\n"
             "      \"action\": \"modify\",\n"
             "      \"changes\": [\n"
             "        {\n"
-            "          \"search\": \"Старый код\",\n"
-            "          \"replace\": \"Новый код\"\n"
+            "          \"search\": \"def old_func():\\n    print('old')\",\n"
+            "          \"replace\": \"def new_func():\\n    print('new')\"\n"
             "        }\n"
             "      ]\n"
             "    }\n"
@@ -35,73 +45,42 @@ class AIOrchestrator:
         )
 
     def format_request(self, user_prompt, project_path, current_file_path=None, file_content=""):
-        """Формирует финальный текстовый запрос к ИИ с добавлением контекста"""
-        prompt = f"Проект находится в: {project_path}\n"
-        
-        if current_file_path and file_content:
-            marker = '`' * 3
-            prompt += f"\nСейчас открыт файл: {current_file_path}\nКод файла:\n{marker}\n{file_content}\n{marker}\n"
-        
-        prompt += f"\nЗАДАЧА ПОЛЬЗОВАТЕЛЯ:\n{user_prompt}"
-        return prompt
+        # Этот метод используется в основном для API, так как в браузере 
+        # мы теперь отправляем правила и контекст отдельными файлами
+        req = self.system_prompt + "\n\n=== ТЕКУЩИЙ СТАТУС ПРОЕКТА ===\n"
+        req += f"Путь проекта: {project_path}\n"
+        if current_file_path:
+            req += f"Активный файл в редакторе: {current_file_path}\n"
+        req += "==============================\n\n"
+        req += f"ЗАДАЧА ПОЛЬЗОВАТЕЛЯ:\n{user_prompt}\n"
+        return req
 
     def parse_and_validate_response(self, raw_text):
-        """Парсит ответ от ИИ: распознает обычный текст или валидирует JSON"""
+        """
+        Умный парсер, который пытается вытащить JSON даже из грязного ответа (Markdown + JSON).
+        """
+        # Убираем возможные Markdown обертки
         marker = '`' * 3
         clean_text = raw_text.replace(f'{marker}json', '').replace(marker, '').strip()
         
-        # Проверяем, похоже ли это на JSON Оркестратора
-        is_looks_like_json = "{" in clean_text and ("\"updates\"" in raw_text or "\"create_files\"" in raw_text or "\"request_files\"" in raw_text)
-        
-        # Если это явно не JSON для кода (а просто ответ-болталка или пример)
-        if not is_looks_like_json:
-            return {
-                "status": "success", 
-                "data": {
-                    "thoughts": raw_text.strip(), # Отдаем весь текст пользователя как "мысли"
-                    "request_files": [],
-                    "create_files": [],
-                    "updates": []
-                }
-            }
-            
-        # Если JSON есть, пытаемся вырезать его
+        # Ищем границы JSON
         start = clean_text.find('{')
-        braces = 0
-        end = -1
-        for i in range(start, len(clean_text)):
-            if clean_text[i] == '{':
-                braces += 1
-            elif clean_text[i] == '}':
-                braces -= 1
-                if braces == 0:
-                    end = i
-                    break
-                    
-        if end == -1:
-            # Если сломались скобки, но "updates" нет - возвращаем как текст
-            if "\"updates\"" not in raw_text:
-                return {
-                    "status": "success", 
-                    "data": {
-                        "thoughts": raw_text.strip(), 
-                        "request_files": [], 
-                        "create_files": [], 
-                        "updates": []
-                    }
-                }
-            return {"status": "error", "error_message": "Некорректная структура JSON (не закрыты скобки)."}
+        end = clean_text.rfind('}')
+        
+        if start == -1 or end == -1:
+            return {"status": "error", "error_message": "Ответ не содержит JSON-объекта. ИИ ответил обычным текстом."}
             
         json_str = clean_text[start:end+1]
         
         try:
+            # Пытаемся распарсить
             data = json.loads(json_str)
             
             # Базовые проверки структуры
             if not isinstance(data, dict):
-                return {"status": "error", "error_message": "Корневой элемент должен быть объектом (dict)."}
+                return {"status": "error", "error_message": "Корневой элемент JSON должен быть объектом (dict)."}
             
-            # Обеспечиваем наличие обязательных ключей
+            # Обеспечиваем наличие обязательных ключей, чтобы не падал интерфейс
             if "thoughts" not in data:
                 data["thoughts"] = ""
                 
@@ -112,7 +91,9 @@ class AIOrchestrator:
             return {"status": "success", "data": data}
             
         except json.JSONDecodeError as e:
-            # Последняя линия обороны: если JSON сломался, но файлов на изменение нет - отдаем текстом
+            # Последняя линия обороны: если JSON сломался окончательно, 
+            # но внутри явно нет попытки изменить код (нет ключей updates/create_files),
+            # мы прощаем ошибку и отдаем текст как обычную "болталку" (thoughts).
             if "\"updates\": [" not in raw_text and "\"create_files\": [" not in raw_text:
                 return {
                     "status": "success", 
@@ -123,6 +104,6 @@ class AIOrchestrator:
                         "updates": []
                     }
                 }
-            return {"status": "error", "error_message": str(e)}
+            return {"status": "error", "error_message": f"Ошибка валидации формата (JSON сломан, проверьте кавычки): {str(e)}"}
         except Exception as e:
             return {"status": "error", "error_message": f"Неизвестная ошибка парсинга: {str(e)}"}
