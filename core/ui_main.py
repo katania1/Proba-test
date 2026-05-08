@@ -1,5 +1,6 @@
 import os
 import re
+import base64
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QSplitter, 
                              QVBoxLayout, QDialog, QTabWidget, QTextBrowser, 
                              QLabel, QFileDialog, QPushButton, QMessageBox, QSizePolicy, QApplication)
@@ -41,6 +42,10 @@ class MainWindow(QMainWindow):
         self.last_full_prompt = ""
         self.current_git_dialog = None
         
+        self.opened_editors = {}
+        
+        # ИСПРАВЛЕНИЕ: Убраны блоки QTabBar::close-button из CSS. 
+        # Теперь Qt сам нарисует стандартные, всегда видимые системные крестики закрытия.
         self.setStyleSheet("""
             QToolTip { background-color: #252526; color: #d4d4d4; border: 1px solid #569cd6; border-radius: 4px; padding: 5px; font-size: 13px; }
             QSplitter::handle { background-color: #3c3c3c; }
@@ -213,13 +218,42 @@ class MainWindow(QMainWindow):
         self.editor_splitter = QSplitter(Qt.Orientation.Vertical)
         
         self.editor_tabs = QTabWidget()
-        self.editor = DarkPythonEditor()
-        self.editor_tabs.addTab(self.editor, "Ничего не открыто")
-        self.editor_splitter.addWidget(self.editor_tabs)
+        self.editor_tabs.setTabsClosable(True)
+        self.editor_tabs.setMovable(True)
+        self.editor_tabs.tabCloseRequested.connect(self.close_tab)
         
-        self.editor_zoom = self.settings.value("editor_zoom", 0, type=int)
-        self.editor.zoomTo(self.editor_zoom)
-        self.editor.installEventFilter(self)
+        self.corner_widget = QWidget()
+        self.corner_layout = QHBoxLayout(self.corner_widget)
+        self.corner_layout.setContentsMargins(0, 0, 5, 0)
+        self.corner_layout.setSpacing(0)
+
+        # ИСПРАВЛЕНИЕ: Железобетонная текстовая кнопка поиска
+        self.btn_tab_search = QPushButton("Поиск")
+        self.btn_tab_search.setFixedSize(60, 28)
+        self.btn_tab_search.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_tab_search.setToolTip("Поиск по коду (Ctrl+F)")
+        
+        self.btn_tab_search.setStyleSheet("""
+            QPushButton { 
+                background-color: #0e639c; 
+                color: white; 
+                border: 1px solid #1177bb; 
+                border-radius: 4px; 
+                font-size: 13px; 
+                font-weight: bold;
+                margin: 2px;
+            }
+            QPushButton:hover { 
+                background-color: #1177bb; 
+                border-color: #38b056; 
+            }
+        """)
+        self.btn_tab_search.clicked.connect(self.toggle_active_search)
+        
+        self.corner_layout.addWidget(self.btn_tab_search)
+        self.editor_tabs.setCornerWidget(self.corner_widget, Qt.Corner.TopRightCorner)
+        
+        self.editor_splitter.addWidget(self.editor_tabs)
         
         self.terminal = TerminalWidget(self.project_path)
         self.terminal.setVisible(False) 
@@ -288,6 +322,17 @@ class MainWindow(QMainWindow):
         self._check_project_environment()
         self._load_recent_chat_history()
 
+    @property
+    def editor(self):
+        """Возвращает текущий активный редактор во вкладках"""
+        widget = self.editor_tabs.currentWidget()
+        return widget if isinstance(widget, DarkPythonEditor) else None
+
+    def toggle_active_search(self):
+        """Вызывает панель поиска в текущем активном редакторе"""
+        if self.editor:
+            self.editor.search_panel.toggle_panel()
+
     def get_selected_engine_data(self):
         return self.status_bar.get_selected_engine_data()
         
@@ -315,13 +360,6 @@ class MainWindow(QMainWindow):
         )
         if files:
             for f in files: self.attachment_panel.add_attachment(os.path.normpath(f))
-
-    def toggle_terminal(self):
-        if self.btn_terminal.isChecked():
-            self.terminal.setVisible(True)
-            self.terminal.input_line.setFocus()
-        else:
-            self.terminal.setVisible(False)
 
     def is_path_safe(self, file_path):
         return self.code_applier.is_path_safe(file_path)
@@ -360,9 +398,10 @@ class MainWindow(QMainWindow):
         self.terminal.update_project_path(new_path)
         self.rag_controller.setup_watcher()
         
+        self.opened_editors.clear()
+        self.editor_tabs.clear()
         self.current_file_path = None
-        self.editor.setText("")
-        self.editor_tabs.setTabText(0, "Ничего не открыто")
+        self.editor_tabs.addTab(DarkPythonEditor(), "Ничего не открыто")
         
         self.memory_old_code = None
         self.proposed_updates = []
@@ -419,7 +458,6 @@ class MainWindow(QMainWindow):
                     safe_content = content.replace('<', '&lt;').replace('>', '&gt;').replace('\n', '<br>')
                     self.chat_history.append(f"<br><span style='color: #569cd6;'><b>ВЫ:</b> {safe_content}</span>")
                 elif role == "AI":
-                    # ПРОГОНЯЕМ ИСТОРИЮ ЧЕРЕЗ НОВЫЙ РЕНДЕР
                     formatted = self.ai_controller.orchestrator.markdown_to_html(content)
                     self.chat_history.append(f"<span style='color: #31a24c;'><b>[МЫСЛИ ИИ]:</b></span>{formatted}")
                 elif role == "SYSTEM":
@@ -441,18 +479,37 @@ class MainWindow(QMainWindow):
         if path.startswith("DELETED:"):
             del_path = path.replace("DELETED:", "")
             if self.current_file_path == del_path:
-                self.editor.setText("")
-                self.current_file_path = None
-                self.editor_tabs.setTabText(0, "Ничего не открыто")
+                self.close_tab_by_path(del_path)
             return
         if self.proposed_updates:
             self.show_popup("Внимание", "Сначала утвердите или отклоните текущие изменения кода!")
             return
-        if os.path.isfile(path):
-            with open(path, 'r', encoding='utf-8') as f:
-                self.editor.setText(f.read())
+            
+        path = os.path.normpath(path)
+        if path in self.opened_editors:
+            index = self.editor_tabs.indexOf(self.opened_editors[path])
+            self.editor_tabs.setCurrentIndex(index)
             self.current_file_path = path
-            self.editor_tabs.setTabText(0, f"📄 {os.path.basename(path)}")
+            return
+
+        if os.path.isfile(path):
+            new_editor = DarkPythonEditor()
+            zoom = self.settings.value("editor_zoom", 0, type=int)
+            new_editor.zoomTo(zoom)
+            new_editor.installEventFilter(self)
+            
+            with open(path, 'r', encoding='utf-8') as f:
+                new_editor.setText(f.read())
+            
+            if self.editor_tabs.count() == 1 and self.editor_tabs.tabText(0) == "Ничего не открыто":
+                 self.editor_tabs.removeTab(0)
+                 
+            index = self.editor_tabs.addTab(new_editor, f"📄 {os.path.basename(path)}")
+            self.editor_tabs.setTabToolTip(index, path)
+            self.editor_tabs.setCurrentIndex(index)
+            
+            self.opened_editors[path] = new_editor
+            self.current_file_path = path
 
     def open_time_machine(self, file_path):
         dialog = TimeMachineDialog(self, file_path, self.file_manager)
@@ -471,11 +528,9 @@ class MainWindow(QMainWindow):
     def handle_chat_link(self, url: QUrl):
         url_str = url.toString()
         
-        # --- НОВАЯ ЛОГИКА КОПИРОВАНИЯ (БЕРЕТ КОД ИЗ ОПЕРАТИВНОЙ ПАМЯТИ) ---
         if url_str.startswith("copycode://"):
             try:
                 block_id = url_str.split("copycode://")[1]
-                # Берем чистый код из памяти Оркестратора
                 raw_code = self.ai_controller.orchestrator.code_blocks_memory.get(block_id, "")
                 if raw_code:
                     QApplication.clipboard().setText(raw_code)
@@ -485,7 +540,6 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 self.log_system(f"❌ Ошибка копирования кода: {e}", color="#d32f2f", is_bold=True)
             return
-        # -----------------------------------------------------------------
         
         if "relay" in url_str:
             entry_id = url.path() if url.scheme() == "relay" else url_str.split(":")[-1]
@@ -555,6 +609,13 @@ class MainWindow(QMainWindow):
         total = self.tokens_sent + self.tokens_received
         self.status_bar.showMessage(f"🟢 Текущая сессия: ~{total:,} токенов | ⬆️ Отправлено: ~{self.tokens_sent:,} | ⬇️ Получено: ~{self.tokens_received:,}")
 
+    def toggle_terminal(self):
+        if self.btn_terminal.isChecked():
+            self.terminal.setVisible(True)
+            self.terminal.input_line.setFocus()
+        else:
+            self.terminal.setVisible(False)
+
     def toggle_pause(self):
         if self.btn_pause.isChecked():
             self.ai_controller.bridge.is_paused = True
@@ -613,3 +674,19 @@ class MainWindow(QMainWindow):
             self.log_system("🩺 Терминал поймал ошибку, но файл не найден. Промпт сформирован.", color="#d32f2f", is_bold=True)
 
         self.btn_code.click()
+        
+    def close_tab(self, index):
+        widget = self.editor_tabs.widget(index)
+        path_to_remove = next((p for p, ed in self.opened_editors.items() if ed == widget), None)
+        if path_to_remove:
+            del self.opened_editors[path_to_remove]
+        self.editor_tabs.removeTab(index)
+        
+        if self.editor_tabs.count() == 0:
+            self.current_file_path = None
+            self.editor_tabs.addTab(DarkPythonEditor(), "Ничего не открыто")
+
+    def close_tab_by_path(self, path):
+        if path in self.opened_editors:
+            index = self.editor_tabs.indexOf(self.opened_editors[path])
+            self.close_tab(index)
