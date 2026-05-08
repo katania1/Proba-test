@@ -68,7 +68,6 @@ class AIOrchestrator:
             if not isinstance(data, dict):
                 return {"status": "error", "error_message": "Корневой элемент JSON должен быть объектом (dict)."}
             
-            # --- НОВЫЙ БРОНЕБОЙНЫЙ ЗАЩИТНИК ---
             if "thoughts" not in data and "updates" not in data and "create_files" not in data:
                 dump = json.dumps(data, ensure_ascii=False, indent=2)
                 data["thoughts"] = f"⚠️ **Внимание: ИИ выдал нестандартный JSON:**\n{marker}json\n{dump}\n{marker}"
@@ -160,22 +159,19 @@ class AIOrchestrator:
             }
         )
 
-        # --- МАГИЯ КНОПКИ КОПИРОВАНИЯ (БЕЗ BASE64) ---
+        # Функция вставки кнопки копирования
         def inject_copy_button(match):
             pre_open = match.group(1)   # <pre ...>
             inner_html = match.group(2) # код с тегами подсветки
             pre_close = match.group(3)  # </pre>
             
-            # Очищаем код от HTML-тегов, чтобы сохранить чистый текст
             raw_code = re.sub(r'<[^>]+>', '', inner_html)
             raw_code = html.unescape(raw_code)
             
-            # Сохраняем код в оперативную память программы под уникальным ID
             self.code_block_counter += 1
             block_id = f"block_{self.code_block_counter}"
             self.code_blocks_memory[block_id] = raw_code
             
-            # Ссылка теперь короткая и не ломает виджет
             btn_html = f"""
             <div style="text-align: right; margin-bottom: -14px; margin-right: 10px; position: relative; z-index: 1;">
                 <a href="copycode://{block_id}" style="color: #a6a6a6; background-color: #2d2d2d; padding: 4px 10px; text-decoration: none; font-size: 11px; font-weight: bold; border-radius: 4px; border: 1px solid #444;">📋 Копировать</a>
@@ -183,8 +179,7 @@ class AIOrchestrator:
             """
             return btn_html + pre_open + inner_html + pre_close
 
-        # Ищем все блоки <pre> и применяем к ним функцию
         html_content = re.sub(r'(<pre[^>]*>)(.*?)(</pre>)', inject_copy_button, html_content, flags=re.DOTALL)
-        # --------------------------------
 
-        return f"{custom_css}<div style='color: #d4d4d4; font-size: 13px; font-family: \"Segoe UI\", Arial, sans-serif;'>{html_content}</div>"
+        # ИСПРАВЛЕНИЕ: Удален жесткий font-size, чтобы работал зум чата
+        return f"{custom_css}<div style='color: #d4d4d4; font-family: \"Segoe UI\", Arial, sans-serif;'>{html_content}</div>"

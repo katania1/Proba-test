@@ -44,8 +44,6 @@ class MainWindow(QMainWindow):
         
         self.opened_editors = {}
         
-        # ИСПРАВЛЕНИЕ: Убраны блоки QTabBar::close-button из CSS. 
-        # Теперь Qt сам нарисует стандартные, всегда видимые системные крестики закрытия.
         self.setStyleSheet("""
             QToolTip { background-color: #252526; color: #d4d4d4; border: 1px solid #569cd6; border-radius: 4px; padding: 5px; font-size: 13px; }
             QSplitter::handle { background-color: #3c3c3c; }
@@ -227,21 +225,23 @@ class MainWindow(QMainWindow):
         self.corner_layout.setContentsMargins(0, 0, 5, 0)
         self.corner_layout.setSpacing(0)
 
-        # ИСПРАВЛЕНИЕ: Железобетонная текстовая кнопка поиска
-        self.btn_tab_search = QPushButton("Поиск")
-        self.btn_tab_search.setFixedSize(60, 28)
+        # ИСПРАВЛЕНИЕ: Буква "П" теперь белая и центрированная без лишних отступов
+        self.btn_tab_search = QPushButton("П")
+        self.btn_tab_search.setFixedSize(28, 28)
         self.btn_tab_search.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_tab_search.setToolTip("Поиск по коду (Ctrl+F)")
         
         self.btn_tab_search.setStyleSheet("""
             QPushButton { 
                 background-color: #0e639c; 
-                color: white; 
+                color: #ffffff; 
                 border: 1px solid #1177bb; 
                 border-radius: 4px; 
-                font-size: 13px; 
+                font-size: 16px; 
                 font-weight: bold;
+                padding: 0px;
                 margin: 2px;
+                text-align: center;
             }
             QPushButton:hover { 
                 background-color: #1177bb; 
@@ -303,6 +303,8 @@ class MainWindow(QMainWindow):
         self.btn_api.clicked.connect(self.open_api_settings)
         self.btn_terminal.clicked.connect(self.toggle_terminal)
         self.btn_rag.clicked.connect(self.rag_controller.start_indexing)
+        
+        # ИСПРАВЛЕНИЕ: Передаем аргумент 'pos' напрямую в метод, чтобы избежать TypeError
         self.btn_rag.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.btn_rag.customContextMenuRequested.connect(self.rag_controller.show_analytics)
 
