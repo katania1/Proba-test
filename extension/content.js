@@ -289,31 +289,56 @@ function extractGeminiText(element) {
     
     let container = document.createElement('div');
     Object.assign(container.style, {
-        position: 'absolute', left: '-9999px', top: '0', visibility: 'hidden', display: 'block'
+        position: 'absolute', left: '-9999px', top: '0', opacity: '0', display: 'block', width: '800px'
     });
     container.appendChild(clone);
     document.body.appendChild(container);
 
+    // 1. Убираем мусор
     clone.querySelectorAll('button, .copy-button, [aria-label*="Copy"]').forEach(btn => btn.remove());
 
+    // 2. ЧИНИМ БЛОКИ КОДА (Именно здесь ломались кавычки!)
     let pres = clone.querySelectorAll('pre');
     pres.forEach(pre => {
         let code = pre.innerText || pre.textContent;
-        let lang = '';
+        let lang = 'python'; // Язык по умолчанию
         
         let wrapper = pre.closest('.code-block, code-block, [class*="code"]');
         if (wrapper) {
-            let header = wrapper.querySelector('.language-name, [class*="header"], span');
-            if (header) lang = (header.innerText || '').trim().split('\n')[0];
+            // Ищем ТОЛЬКО название языка. Убрали поиск по случайным тегам 'span'!
+            let header = wrapper.querySelector('.language-name, .code-block-language');
+            if (header && header.innerText) {
+                // Очищаем название языка от лишних символов
+                lang = header.innerText.trim().split('\n')[0].replace(/[^a-zA-Z0-9+#-]/g, '').toLowerCase();
+            }
         }
 
-        let textNode = document.createTextNode(`\n\`\`\`${lang}\n${code}\n\`\`\`\n`);
-        pre.replaceWith(textNode);
+        let mdCodeBlock = document.createElement('div');
+        // Строгие кавычки без лишних слов!
+        mdCodeBlock.innerText = `\n\n\`\`\`${lang || 'python'}\n${code}\n\`\`\`\n\n`;
+        
+        if (wrapper && wrapper.parentNode) {
+            wrapper.replaceWith(mdCodeBlock);
+        } else if (pre.parentNode) {
+            pre.replaceWith(mdCodeBlock);
+        }
+    });
+
+    // 3. ВОССТАНАВЛИВАЕМ СПИСКИ (Бронебойный метод)
+    clone.querySelectorAll('li').forEach(li => {
+        if (li.parentNode && li.parentNode.tagName === 'OL') {
+            let idx = Array.from(li.parentNode.children).indexOf(li) + 1;
+            li.textContent = `${idx}. ${li.textContent}`;
+        } else {
+            li.textContent = `- ${li.textContent}`;
+        }
     });
 
     let result = clone.innerText || clone.textContent;
     document.body.removeChild(container);
-    return result;
+    
+    // Удаляем лишние пустые строки для красоты
+    return result.replace(/\n{3,}/g, '\n\n').trim();
 }
 
 async function checkServer() {
@@ -423,43 +448,49 @@ async function sendToGemini(text, filesPayload = []) {
             const dt = new DataTransfer();
             files.forEach(f => dt.items.add(f));
             
-            // 1. Попытка нативной инъекции файлов через скрытый input (Идеальный вариант для .txt/.py)
+            // ХАК 1: Нативная инъекция через React setter (Обход блокировок)
             const fileInput = document.querySelector('input[type="file"]');
             if (fileInput) {
-                console.log("VibeCoder: Найден нативный input[type=file]. Инжектируем виртуальные файлы...");
-                fileInput.files = dt.files;
+                console.log("VibeCoder: Найдена кнопка загрузки. Выполняю React-инъекцию...");
+                const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'files').set;
+                nativeSetter.call(fileInput, dt.files);
                 fileInput.dispatchEvent(new Event('change', { bubbles: true }));
             } else {
-                // 2. Хак с перехватом события paste для Chrome
-                console.log("VibeCoder: Нативный input не найден. Используем хак ClipboardEvent...");
-                const pasteEvent = new ClipboardEvent('paste', { bubbles: true, cancelable: true });
-                // Жесткое переопределение свойства, которое Chrome пытается игнорировать
-                Object.defineProperty(pasteEvent, 'clipboardData', { value: dt });
-                inputArea.dispatchEvent(pasteEvent);
+                // ХАК 2: Эмуляция физического броска файлов в чат (Drag & Drop)
+                console.log("VibeCoder: Использую Drag & Drop инъекцию...");
+                const dropEvent = new DragEvent('drop', {
+                    bubbles: true,
+                    cancelable: true,
+                    dataTransfer: dt
+                });
+                inputArea.dispatchEvent(dropEvent);
             }
             
-            console.log("VibeCoder: Файлы переданы в DOM. Ожидание асинхронной загрузки сервером Google...");
-            await new Promise(r => setTimeout(r, 800));
+            console.log("VibeCoder: Файлы отправлены в интерфейс. Жду старта загрузки...");
+            await new Promise(r => setTimeout(r, 1500));
             
             let retries = 0;
-            // Увеличили цикл ожидания: файлы RAG могут весить больше обычных картинок
-            while (retries < 30) { 
+            let isUploading = false;
+            
+            while (retries < 40) { 
                 await new Promise(r => setTimeout(r, 500));
                 
-                const spinners = document.querySelectorAll('mat-progress-spinner, .gmat-mdc-progress-spinner, [aria-label="Loading"]');
-                const sendBtn = Array.from(document.querySelectorAll('button')).find(b => {
-                    const combined = ((b.getAttribute('aria-label') || '') + " " + (b.innerText || '')).toLowerCase();
-                    return (combined.includes('send') || combined.includes('отправить')) && !combined.includes('feedback');
-                }) || document.querySelector('[data-testid="send-button"], .send-button');
-
-                if (spinners.length === 0 && sendBtn && !sendBtn.disabled) {
-                    console.log("VibeCoder: Загрузка файлов на сервера Gemini успешно завершена.");
+                // Ищем крутилки загрузки или счетчики прикрепленных файлов
+                const spinners = document.querySelectorAll('mat-progress-spinner, .gmat-mdc-progress-spinner, [aria-label="Loading"], .uploader-progress');
+                
+                if (spinners.length > 0) {
+                    isUploading = true;
+                } else if (isUploading && spinners.length === 0) {
+                    console.log("VibeCoder: Загрузка файлов успешно завершена на серверах Google.");
+                    break;
+                } else if (retries > 6 && spinners.length === 0) {
+                    // Если спиннеры так и не появились за 3 секунды - значит файл залетел мгновенно
                     break;
                 }
                 retries++;
             }
         } catch (err) {
-            console.error("VibeCoder: Ошибка при инъекции файлов в интерфейс:", err);
+            console.error("VibeCoder: Критическая ошибка при инъекции файлов:", err);
         }
     }
 
@@ -476,9 +507,8 @@ async function sendToGemini(text, filesPayload = []) {
         }) || document.querySelector('[data-testid="send-button"], .send-button');
 
         if (sendBtn && !sendBtn.disabled) {
+            console.log("VibeCoder: Нажатие кнопки Отправить.");
             sendBtn.click();
-        } else {
-            console.warn("VibeCoder: Кнопка отправки недоступна. Возможен тайм-аут загрузки файлов.");
         }
         setTimeout(() => { isProcessing = false; stableCount = 0; }, 2000);
     }, 500);

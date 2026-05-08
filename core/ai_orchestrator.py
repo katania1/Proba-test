@@ -1,9 +1,15 @@
 import json
 import re
 import html
+import markdown
+from pygments.formatters import HtmlFormatter
 
 class AIOrchestrator:
     def __init__(self):
+        # Хранилище для кодовых блоков (чтобы не перегружать ссылки длинным текстом)
+        self.code_blocks_memory = {}
+        self.code_block_counter = 0
+        
         self.system_prompt = (
             "Ты — главный AI-разработчик и архитектор (VibeCoder).\n\n"
             "У ТЕБЯ ЕСТЬ ДВА РЕЖИМА РАБОТЫ:\n"
@@ -62,6 +68,11 @@ class AIOrchestrator:
             if not isinstance(data, dict):
                 return {"status": "error", "error_message": "Корневой элемент JSON должен быть объектом (dict)."}
             
+            # --- НОВЫЙ БРОНЕБОЙНЫЙ ЗАЩИТНИК ---
+            if "thoughts" not in data and "updates" not in data and "create_files" not in data:
+                dump = json.dumps(data, ensure_ascii=False, indent=2)
+                data["thoughts"] = f"⚠️ **Внимание: ИИ выдал нестандартный JSON:**\n{marker}json\n{dump}\n{marker}"
+            
             if "thoughts" not in data:
                 data["thoughts"] = ""
                 
@@ -86,32 +97,23 @@ class AIOrchestrator:
         except Exception as e:
             return {"status": "error", "error_message": f"Неизвестная ошибка парсинга: {str(e)}"}
 
-    # ==========================================
-    # УТИЛИТЫ ПАРСИНГА И РЕНДЕРИНГА (Перенесено из AIController)
-    # ==========================================
     def extract_first_json(self, text):
-        """Пытается извлечь первый валидный JSON из грязного текста"""
         start = text.find('{')
         if start == -1: return None
-        
         braces = 0
         for i in range(start, len(text)):
             if text[i] == '{': braces += 1
             elif text[i] == '}':
                 braces -= 1
                 if braces == 0:
-                    try:
-                        return json.loads(text[start:i+1])
-                    except:
-                        return None
+                    try: return json.loads(text[start:i+1])
+                    except: return None
         return None
 
     def extract_thoughts_robustly(self, raw_text):
-        """Надежно извлекает поле 'thoughts' (или весь текст, если это не JSON)"""
         result = self.parse_and_validate_response(raw_text)
         if result["status"] == "success":
             return result["data"].get("thoughts", "")
-
         start_idx = raw_text.find('{')
         end_idx = raw_text.rfind('}') + 1
         if start_idx != -1 and end_idx != -1:
@@ -121,32 +123,68 @@ class AIOrchestrator:
                 return data.get("thoughts", "")
             except Exception:
                 match = re.search(r'"thoughts"\s*:\s*"(.*?)"\s*,\s*"(?:request_files|create_files|updates)"', json_str, re.DOTALL)
-                if match:
-                    return match.group(1).replace('\\n', '\n').replace('\\"', '"')
-        
+                if match: return match.group(1).replace('\\n', '\n').replace('\\"', '"')
         marker = '`' * 3
         return raw_text.replace(f'{marker}json', '').replace(marker, '').strip()
 
     def markdown_to_html(self, text):
-        """Рендерит Markdown текст и блоки кода в красивый HTML для чата"""
-        text = html.escape(text)
-        text = f"<div style='color: #d4d4d4; line-height: 1.5;'>{text}</div>"
+        """Рендерит Markdown текст и блоки кода в красивый HTML для чата через библиотеки"""
+        
+        custom_css = """
+        <style>
+            p { margin-top: 0px; margin-bottom: 12px; line-height: 1.4; }
+            h1, h2, h3, h4 { color: #569cd6; margin-top: 15px; margin-bottom: 10px; font-weight: bold; }
+            ul, ol { margin-top: 0px; margin-bottom: 12px; margin-left: 20px; }
+            li { margin-bottom: 6px; }
+            code { background-color: #2d2d2d; color: #ce9178; font-family: Consolas, monospace; padding: 2px 4px; border-radius: 3px; }
+            pre { background-color: #1e1e1e; padding: 12px; border: 1px solid #3c3c3c; margin: 10px 0; font-family: Consolas, monospace; font-size: 13px; border-radius: 5px; white-space: pre-wrap; }
+            pre code { background-color: transparent; padding: 0; color: inherit; }
+        </style>
+        """
 
-        def code_replacer(match):
-            lang = match.group(1).strip()
-            lang = lang.split('\n')[0].strip()
-            code = match.group(2).strip('\n') 
-            header = f"<div style='background-color: #2d2d2d; color: #858585; padding: 4px 10px; font-size: 11px; font-weight: bold; border-top-left-radius: 5px; border-top-right-radius: 5px;'>{lang.upper() if lang else 'CODE'}</div>"
-            body = f"<pre style='margin: 0; padding: 10px; color: #d4d4d4; font-family: Consolas, monospace; font-size: 13px; white-space: pre-wrap;'>{code}</pre>"
-            return f"</div><div style='background-color: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 5px; margin: 10px 0;'>{header}{body}</div><div style='color: #d4d4d4; line-height: 1.5;'>"
+        html_content = markdown.markdown(
+            text,
+            extensions=[
+                'fenced_code', 
+                'codehilite',  
+                'tables',      
+                'sane_lists',  
+                'nl2br'        
+            ],
+            extension_configs={
+                'codehilite': {
+                    'noclasses': True,
+                    'pygments_style': 'monokai',
+                    'nobackground': True
+                }
+            }
+        )
 
-        text = re.sub(r'`{3}(.*?)\n(.*?)`{3}', code_replacer, text, flags=re.DOTALL)
-        text = re.sub(r'`(.*?)`', r"<code style='background-color: #3c3c3c; color: #ce9178; padding: 2px 5px; border-radius: 4px; font-family: Consolas, monospace;'>\1</code>", text)
-        text = re.sub(r'\*\*(.*?)\*\*', r"<b style='color: #ffffff;'>\1</b>", text)
+        # --- МАГИЯ КНОПКИ КОПИРОВАНИЯ (БЕЗ BASE64) ---
+        def inject_copy_button(match):
+            pre_open = match.group(1)   # <pre ...>
+            inner_html = match.group(2) # код с тегами подсветки
+            pre_close = match.group(3)  # </pre>
+            
+            # Очищаем код от HTML-тегов, чтобы сохранить чистый текст
+            raw_code = re.sub(r'<[^>]+>', '', inner_html)
+            raw_code = html.unescape(raw_code)
+            
+            # Сохраняем код в оперативную память программы под уникальным ID
+            self.code_block_counter += 1
+            block_id = f"block_{self.code_block_counter}"
+            self.code_blocks_memory[block_id] = raw_code
+            
+            # Ссылка теперь короткая и не ломает виджет
+            btn_html = f"""
+            <div style="text-align: right; margin-bottom: -14px; margin-right: 10px; position: relative; z-index: 1;">
+                <a href="copycode://{block_id}" style="color: #a6a6a6; background-color: #2d2d2d; padding: 4px 10px; text-decoration: none; font-size: 11px; font-weight: bold; border-radius: 4px; border: 1px solid #444;">📋 Копировать</a>
+            </div>
+            """
+            return btn_html + pre_open + inner_html + pre_close
 
-        parts = re.split(r'(<pre.*?</pre>)', text, flags=re.DOTALL)
-        for i in range(len(parts)):
-            if not parts[i].startswith('<pre'):
-                parts[i] = parts[i].replace('\n', '<br>')
+        # Ищем все блоки <pre> и применяем к ним функцию
+        html_content = re.sub(r'(<pre[^>]*>)(.*?)(</pre>)', inject_copy_button, html_content, flags=re.DOTALL)
+        # --------------------------------
 
-        return "".join(parts)
+        return f"{custom_css}<div style='color: #d4d4d4; font-size: 13px; font-family: \"Segoe UI\", Arial, sans-serif;'>{html_content}</div>"

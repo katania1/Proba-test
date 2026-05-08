@@ -109,7 +109,7 @@ class TerminalWidget(QWidget):
             self.command_history.append(cmd)
             self.history_idx = len(self.command_history)
             
-            self.append_text(f'\n<span style="color: #31a24c; font-weight: bold;">> {cmd}</span>\n', is_html=True)
+            # УДАЛЕНА СТРОКА self.append_text, чтобы избежать двойного эхо от cmd.exe
             self.execute_cmd(cmd)
             self.input_line.clear()
             

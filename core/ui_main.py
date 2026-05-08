@@ -2,7 +2,7 @@ import os
 import re
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QSplitter, 
                              QVBoxLayout, QDialog, QTabWidget, QTextBrowser, 
-                             QLabel, QFileDialog, QPushButton, QMessageBox, QSizePolicy)
+                             QLabel, QFileDialog, QPushButton, QMessageBox, QSizePolicy, QApplication)
 from PyQt6.QtCore import Qt, QDir, QUrl, QSettings, QEvent
 from PyQt6.QtGui import QShortcut, QKeySequence
 
@@ -32,7 +32,7 @@ from core.bottom_panel import BottomPanelWidget
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("VibeCoder v1.19 — Pro IDE Edition")
+        self.setWindowTitle("VibeCoder v1.24 — Pro IDE Edition")
         
         self.settings = QSettings("VibeCoder", "Preferences")
         self.api_settings = QSettings("VibeCoder", "API_Config")
@@ -119,7 +119,6 @@ class MainWindow(QMainWindow):
         input_layout.setSpacing(2)
         
         self.prompt_input = VibeTextEdit()
-        # Обновленный плейсхолдер под новую логику кнопок
         self.prompt_input.setPlaceholderText("Напишите задание (Enter - Спросить, Ctrl+Enter - Кодить)...")
         self.prompt_input.setStyleSheet("background-color: transparent; border: none; color: #d4d4d4;")
         self.prompt_input.tag_action_signal.connect(self.handle_tag_action)
@@ -139,7 +138,6 @@ class MainWindow(QMainWindow):
         action_layout = QHBoxLayout()
         action_layout.setContentsMargins(5, 0, 5, 5)
         
-        # --- ГЕНЕРАТОР СТИЛЕЙ С ПОДДЕРЖКОЙ ВИЗУАЛЬНОГО НАЖАТИЯ (:pressed) ---
         def get_btn_style(bg, hover, pressed, color="white", border="none"):
             return f"""
                 QPushButton {{ background-color: {bg}; color: {color}; border: {border}; font-weight: bold; border-radius: 3px; padding: 4px 12px; font-size: 11px; margin-left: 5px; }}
@@ -167,7 +165,6 @@ class MainWindow(QMainWindow):
         self.btn_reject_main.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
         self.btn_reject_main.setVisible(False)
 
-        # У кнопки Пауза сложный стиль из-за Checkable-состояния
         self.btn_pause = QPushButton("■ Пауза")
         self.btn_pause.setCheckable(True)
         self.btn_pause.setFixedHeight(26)
@@ -182,7 +179,6 @@ class MainWindow(QMainWindow):
         """)
         self.btn_pause.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
 
-        # --- НОВЫЕ КНОПКИ УПРАВЛЕНИЯ КОНТЕКСТОМ ---
         self.btn_chat = QPushButton("💬 Спросить")
         self.btn_chat.setFixedHeight(26)
         self.btn_chat.setMinimumWidth(80)
@@ -195,18 +191,11 @@ class MainWindow(QMainWindow):
         self.btn_code.setStyleSheet(get_btn_style("#0e639c", "#1177bb", "#094771"))
         self.btn_code.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
 
-        # 1. Сначала Инспектор
         action_layout.addWidget(self.btn_inspector)
-        
-        # 2. Пружина (Прижимает Инспектор влево, остальные вправо)
         action_layout.addStretch()
-        
-        # 3. Остальные кнопки
         action_layout.addWidget(self.btn_approve)
         action_layout.addWidget(self.btn_reject_main)
         action_layout.addWidget(self.btn_pause)
-        
-        # Добавляем новые кнопки отправки
         action_layout.addWidget(self.btn_chat)
         action_layout.addWidget(self.btn_code)
 
@@ -291,18 +280,13 @@ class MainWindow(QMainWindow):
             self.ai_controller.mcp_manager.error_message
         )
         
-        # Привязка новых кнопок к методу с передачей флага режима работы
         self.btn_chat.clicked.connect(lambda: self.ai_controller.send_task(is_coding_mode=False))
         self.btn_code.clicked.connect(lambda: self.ai_controller.send_task(is_coding_mode=True))
-        
-        # Если сигнал приходит от горячей клавиши Ctrl+Enter из VibeTextEdit
         self.prompt_input.send_signal.connect(lambda: self.ai_controller.send_task(is_coding_mode=True))
-        
         self.btn_relay.clicked.connect(self.ai_controller.force_relay)
 
         self._check_project_environment()
         self._load_recent_chat_history()
-
 
     def get_selected_engine_data(self):
         return self.status_bar.get_selected_engine_data()
@@ -430,12 +414,17 @@ class MainWindow(QMainWindow):
             for log in logs[-20:]:
                 role = log.get("role", "")
                 content = log.get("content", "")
-                safe_content = content.replace('<', '&lt;').replace('>', '&gt;').replace('\n', '<br>')
                 
-                if role == "USER": self.chat_history.append(f"<br><span style='color: #569cd6;'><b>ВЫ:</b> {safe_content}</span>")
-                elif role == "AI": self.chat_history.append(f"<span style='color: #31a24c;'><b>[МЫСЛИ ИИ]:</b> {safe_content}</span>")
-                elif role == "SYSTEM": self.chat_history.append(f"<div style='color: #858585; font-size: 13px; margin-left: 10px;'>[СИСТЕМА] {safe_content}</div>")
-                    
+                if role == "USER":
+                    safe_content = content.replace('<', '&lt;').replace('>', '&gt;').replace('\n', '<br>')
+                    self.chat_history.append(f"<br><span style='color: #569cd6;'><b>ВЫ:</b> {safe_content}</span>")
+                elif role == "AI":
+                    # ПРОГОНЯЕМ ИСТОРИЮ ЧЕРЕЗ НОВЫЙ РЕНДЕР
+                    formatted = self.ai_controller.orchestrator.markdown_to_html(content)
+                    self.chat_history.append(f"<span style='color: #31a24c;'><b>[МЫСЛИ ИИ]:</b></span>{formatted}")
+                elif role == "SYSTEM":
+                    self.chat_history.append(f"<div style='color: #858585; font-size: 13px; margin-left: 10px;'>[СИСТЕМА] {content}</div>")
+            
             self.chat_history.append("<br><span style='color: #888888;'><i>--- Текущая сессия ---</i></span><br>")
             self.scroll_chat()
 
@@ -481,6 +470,23 @@ class MainWindow(QMainWindow):
 
     def handle_chat_link(self, url: QUrl):
         url_str = url.toString()
+        
+        # --- НОВАЯ ЛОГИКА КОПИРОВАНИЯ (БЕРЕТ КОД ИЗ ОПЕРАТИВНОЙ ПАМЯТИ) ---
+        if url_str.startswith("copycode://"):
+            try:
+                block_id = url_str.split("copycode://")[1]
+                # Берем чистый код из памяти Оркестратора
+                raw_code = self.ai_controller.orchestrator.code_blocks_memory.get(block_id, "")
+                if raw_code:
+                    QApplication.clipboard().setText(raw_code)
+                    self.log_system("📋 Код успешно скопирован в буфер обмена!", color="#31a24c", is_bold=True)
+                else:
+                    self.log_system("❌ Ошибка: Код устарел или не найден в памяти сессии.", color="#d32f2f", is_bold=True)
+            except Exception as e:
+                self.log_system(f"❌ Ошибка копирования кода: {e}", color="#d32f2f", is_bold=True)
+            return
+        # -----------------------------------------------------------------
+        
         if "relay" in url_str:
             entry_id = url.path() if url.scheme() == "relay" else url_str.split(":")[-1]
             entry = self.chat_logger.get_by_id(entry_id)
@@ -606,5 +612,4 @@ class MainWindow(QMainWindow):
         else:
             self.log_system("🩺 Терминал поймал ошибку, но файл не найден. Промпт сформирован.", color="#d32f2f", is_bold=True)
 
-        # Теперь автоисправление ошибки вызывает "тяжелый" запрос (Кодить)
         self.btn_code.click()

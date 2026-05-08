@@ -14,10 +14,6 @@ class ContextBuilder:
             return base64.b64encode(f.read()).decode('utf-8')
 
     def build_payload(self, user_text, is_coding_mode, is_browser):
-        """
-        Собирает все файлы, RAG и системные инструкции в единый пакет.
-        Возвращает словарь готовый к отправке.
-        """
         # 1. Физические картинки
         image_paths = list(self.mw.attachment_panel.get_attachments())
         image_payload = []
@@ -28,7 +24,7 @@ class ContextBuilder:
                 if not mime_type: mime_type = "image/jpeg"
                 image_payload.append({"mime": mime_type, "data": base64_img, "name": os.path.basename(path)})
 
-        # 2. RAG Контекст (Только для кодинга)
+        # 2. RAG Контекст
         rag_context_str = ""
         if is_coding_mode:
             rag_context_str = self.mw.rag_controller.get_context_for_prompt(user_text)
@@ -59,7 +55,6 @@ class ContextBuilder:
                 "У тебя есть доступ к внешним инструментам (Context7, Поиск, БД).\n"
                 "АБСОЛЮТНЫЙ ПРИОРИТЕТ: Если тебе нужно вызвать инструмент, ВЕРНИ ТОЛЬКО ОДИН JSON в формате:\n"
                 '{"tool": "имя_инструмента", "args": {"ключ": "значение"}}\n'
-                "Ты можешь вызывать инструменты ПО ОЧЕРЕДИ несколько раз.\n"
                 "Список инструментов:\n" + json.dumps(tools_schema, ensure_ascii=False, indent=2) + "\n\n"
             )
 
@@ -71,10 +66,10 @@ class ContextBuilder:
         # ==================================
         if is_browser:
             if is_coding_mode:
-                system_rules = tools_instruction + self.ctrl.orchestrator.system_prompt
-                b64_rules = base64.b64encode(system_rules.encode('utf-8')).decode('utf-8')
-                image_payload.append({"mime": "text/plain", "data": b64_rules, "name": "vibe_instructions.txt"})
-
+                # ИСПРАВЛЕНИЕ: Легкие правила JSON вставляем прямо в текст, чтобы ИИ их не потерял
+                core_rules = tools_instruction + self.ctrl.orchestrator.system_prompt
+                
+                # А вот тяжелые данные пакуем в файлы
                 if rag_context_str:
                     b64_rag = base64.b64encode(rag_context_str.encode('utf-8')).decode('utf-8')
                     image_payload.append({"mime": "text/plain", "data": b64_rag, "name": "rag_context.txt"})
@@ -83,13 +78,10 @@ class ContextBuilder:
                 b64_state = base64.b64encode(state_text.encode('utf-8')).decode('utf-8')
                 image_payload.append({"mime": "text/plain", "data": b64_state, "name": "project_state.txt"})
 
-                final_prompt_text = user_text + "\n\n[СИСТЕМНОЕ НАПОМИНАНИЕ: Правила проекта, структура папок, код файлов и RAG-контекст прикреплены к этому сообщению в виде текстовых файлов. Обязательно прочитай vibe_instructions.txt перед ответом и отвечай СТРОГО в формате JSON Оркестратора. Не используй Markdown-заглушки.]"
+                final_prompt_text = core_rules + "\n\n=== ЗАДАЧА ПОЛЬЗОВАТЕЛЯ ===\n" + user_text + "\n\n[СИСТЕМНОЕ НАПОМИНАНИЕ: Структура папок, твой код и RAG-контекст прикреплены к этому сообщению в виде файлов (rag_context.txt и project_state.txt). Обязательно прочитай их, если они есть. Отвечай СТРОГО в формате JSON Оркестратора.]"
             else:
                 chat_rules = tools_instruction + "Ты — умный AI-помощник разработчика. Отвечай на вопросы пользователя в свободном формате (Markdown). Пиши понятно, приводи примеры кода, если нужно. НИКАКИХ JSON-структур."
-                b64_rules = base64.b64encode(chat_rules.encode('utf-8')).decode('utf-8')
-                image_payload.append({"mime": "text/plain", "data": b64_rules, "name": "vibe_chat_rules.txt"})
-                
-                final_prompt_text = user_text + "\n\n[СИСТЕМНОЕ НАПОМИНАНИЕ: Мы находимся в режиме 'Чат'. Отвечай обычным текстом (Markdown), JSON-структура НЕ нужна. Прикрепленные файлы (если есть) нужны только для контекста вопроса.]"
+                final_prompt_text = chat_rules + "\n\n=== ВОПРОС ПОЛЬЗОВАТЕЛЯ ===\n" + user_text + "\n\n[СИСТЕМНОЕ НАПОМИНАНИЕ: Мы находимся в режиме 'Чат'. Отвечай обычным текстом (Markdown), JSON-структура НЕ нужна.]"
 
         # ==================================
         # МАРШРУТ Б: Для прямых API
@@ -114,7 +106,7 @@ class ContextBuilder:
 
         return {
             "text": final_prompt_text,
-            "images": image_payload,     # Base64 для браузера
-            "image_paths": image_paths,  # Пути для API-провайдеров
+            "images": image_payload,
+            "image_paths": image_paths,
             "api_sys_prompt": api_sys_prompt
         }
