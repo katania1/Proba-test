@@ -301,7 +301,7 @@ function extractGeminiText(element) {
     let pres = clone.querySelectorAll('pre');
     pres.forEach(pre => {
         let code = pre.innerText || pre.textContent;
-        let lang = 'python';
+        let lang = 'python'; // Язык по умолчанию
         
         let wrapper = pre.closest('.code-block, code-block, [class*="code"]');
         if (wrapper) {
@@ -394,6 +394,16 @@ async function checkServer() {
         }
 
         const modelResponses = document.querySelectorAll(['message-content', '.model-response-text', '[data-message-author-role="model"]'].join(', '));
+        
+        // --- ИСПРАВЛЕНИЕ: ЖЕСТКАЯ БЛОКИРОВКА ЧТЕНИЯ СТАРЫХ ПУЗЫРЕЙ (RACE CONDITION FIX) ---
+        if (window.expectedMinBubbles !== undefined && modelResponses.length < window.expectedMinBubbles) {
+            console.log(`VibeCoder: Ждем появления нового пузыря ответа... (Ожидаем: ${window.expectedMinBubbles}, Сейчас: ${modelResponses.length})`);
+            lastServerState = "RUNNING";
+            updatePanelUI(false, false);
+            return; // Прерываем функцию, чтобы не прочитать старый текст!
+        }
+        // ----------------------------------------------------------------------------------
+
         if (modelResponses.length > 0) {
             const lastResponse = modelResponses[modelResponses.length - 1];
             let text = extractGeminiText(lastResponse);
@@ -412,6 +422,7 @@ async function checkServer() {
                     try {
                         await fetchPostProxy(`${SERVER_URL}/post_result`, payloadString);
                     } catch (err) {} finally {
+                        window.expectedMinBubbles = undefined; // Сбрасываем ожидание после успешной отправки
                         isProcessing = false; stableCount = 0; activeTaskId = null;
                     }
                 }
@@ -443,7 +454,6 @@ async function sendToGemini(text, filesPayload = []) {
             const dt = new DataTransfer();
             files.forEach(f => dt.items.add(f));
             
-            // ХАК 1: Нативная инъекция через React setter
             const fileInput = document.querySelector('input[type="file"]');
             if (fileInput) {
                 console.log("VibeCoder: Найдена кнопка загрузки. Выполняю React-инъекцию...");
@@ -451,45 +461,36 @@ async function sendToGemini(text, filesPayload = []) {
                 nativeSetter.call(fileInput, dt.files);
                 fileInput.dispatchEvent(new Event('change', { bubbles: true }));
             } else {
-                // ХАК 2: Эмуляция физического броска файлов
                 console.log("VibeCoder: Использую Drag & Drop инъекцию...");
                 const dropEvent = new DragEvent('drop', {
-                    bubbles: true, cancelable: true, dataTransfer: dt
+                    bubbles: true,
+                    cancelable: true,
+                    dataTransfer: dt
                 });
                 inputArea.dispatchEvent(dropEvent);
             }
             
             console.log("VibeCoder: Файлы отправлены в интерфейс. Жду старта загрузки...");
-            await new Promise(r => setTimeout(r, 1500)); // Первичная задержка для старта анимации
+            await new Promise(r => setTimeout(r, 1500));
             
-            // --- НОВАЯ УМНАЯ ЗАДЕРЖКА ---
             let retries = 0;
             let isUploading = false;
             
-            while (retries < 40) { // Максимум 20 секунд ожидания
+            while (retries < 40) { 
                 await new Promise(r => setTimeout(r, 500));
                 
-                // Проверяем наличие лоадеров
-                const spinners = document.querySelectorAll('mat-progress-spinner, .gmat-mdc-progress-spinner, [aria-label="Loading"], .uploader-progress, [role="progressbar"]');
-                
-                // Проверяем состояние кнопки отправки
-                const sendBtnForCheck = document.querySelector('button[aria-label*="Send"], button[aria-label*="Отправить"], [data-testid="send-button"], .send-button');
-                const isBtnDisabled = sendBtnForCheck && (sendBtnForCheck.disabled || sendBtnForCheck.getAttribute('aria-disabled') === 'true');
+                const spinners = document.querySelectorAll('mat-progress-spinner, .gmat-mdc-progress-spinner, [aria-label="Loading"], .uploader-progress');
                 
                 if (spinners.length > 0) {
                     isUploading = true;
-                } else if (isUploading && spinners.length === 0 && !isBtnDisabled) {
-                    console.log("VibeCoder: Загрузка файлов успешно завершена, кнопка разблокирована.");
+                } else if (isUploading && spinners.length === 0) {
+                    console.log("VibeCoder: Загрузка файлов успешно завершена на серверах Google.");
                     break;
-                } else if (retries > 6 && spinners.length === 0 && !isBtnDisabled) {
-                    // Если спиннеров нет вообще, но кнопка активна - файл залетел мгновенно
-                    console.log("VibeCoder: Файлы загружены мгновенно.");
+                } else if (retries > 6 && spinners.length === 0) {
                     break;
                 }
                 retries++;
             }
-            // -----------------------------
-            
         } catch (err) {
             console.error("VibeCoder: Критическая ошибка при инъекции файлов:", err);
         }
@@ -501,6 +502,12 @@ async function sendToGemini(text, filesPayload = []) {
     inputArea.dispatchEvent(new Event('change', { bubbles: true }));
     
     setTimeout(() => {
+        // --- ЗАХВАТ КОЛИЧЕСТВА ПУЗЫРЕЙ ПЕРЕД ОТПРАВКОЙ ---
+        const currentBubbles = document.querySelectorAll(['message-content', '.model-response-text', '[data-message-author-role="model"]'].join(', ')).length;
+        window.expectedMinBubbles = currentBubbles + 1;
+        console.log(`VibeCoder: Зафиксировано ${currentBubbles} старых пузырей. Ожидаем появление ${window.expectedMinBubbles}-го.`);
+        // ------------------------------------------------
+
         const buttons = Array.from(document.querySelectorAll('button'));
         const sendBtn = buttons.find(b => {
             const combined = ((b.getAttribute('aria-label') || '') + " " + (b.innerText || '')).toLowerCase();
@@ -510,11 +517,9 @@ async function sendToGemini(text, filesPayload = []) {
         if (sendBtn && !sendBtn.disabled) {
             console.log("VibeCoder: Нажатие кнопки Отправить.");
             sendBtn.click();
-        } else {
-            console.warn("VibeCoder: Кнопка Отправить всё еще заблокирована перед кликом!");
         }
         setTimeout(() => { isProcessing = false; stableCount = 0; }, 2000);
-    }, 800); // Чуть увеличен финальный таймаут перед кликом для надежности
+    }, 500);
 }
 
 setInterval(checkServer, 3000);

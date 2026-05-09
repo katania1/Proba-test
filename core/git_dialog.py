@@ -95,8 +95,14 @@ class GitHistoryDialog(QDialog):
             return
             
         for entry in history:
-            item = QListWidgetItem(f"[{entry['date']}] {entry['message']}")
+            # ИСПРАВЛЕНИЕ 2: Оставляем в списке только первую строку коммита для аккуратности
+            short_msg = entry['message'].split('\n')[0]
+            item = QListWidgetItem(f"[{entry['date']}] {short_msg}")
             item.setData(Qt.ItemDataRole.UserRole, entry['hash'])
+            
+            # Добавляем всплывающую подсказку (ToolTip) с полным текстом коммита
+            item.setToolTip(f"Коммит: {entry['hash']}\nДата: {entry['date']}\n\n{entry['message']}")
+            
             self.history_list.addItem(item)
             
     def on_commit_selected(self):
@@ -211,7 +217,8 @@ class GitDialog(QDialog):
         layout.addLayout(sel_layout)
 
         self.text_input = QTextEdit()
-        self.text_input.setStyleSheet("background-color: #252526; border: 1px solid #3c3c3c; font-size: 14px; padding: 10px;")
+        # ИСПРАВЛЕНИЕ 1: Явно добавлено color: #d4d4d4; для видимости текста
+        self.text_input.setStyleSheet("background-color: #252526; color: #d4d4d4; border: 1px solid #3c3c3c; font-size: 14px; padding: 10px;")
         self.text_input.setPlaceholderText("Напишите текст коммита (или нажмите '✨ Сгенерировать ИИ-описание')...")
         self.text_input.setMaximumHeight(80) 
         layout.addWidget(self.text_input)
