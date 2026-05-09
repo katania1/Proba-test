@@ -1,26 +1,55 @@
 import os
 from PyQt6.QtWidgets import QMessageBox
-from PyQt6.QtCore import QDir, QTimer
+from PyQt6.QtCore import QDir, QTimer, QThread, pyqtSignal
 
 from core.vector_db import VectorDatabase
 from core.indexer_worker import IndexerWorker
 from core.rag_dialog import RAGAnalyticsDialog
 from core.embeddings import EmbeddingFactory
 
+# --- ИСПРАВЛЕНИЕ: Фоновый поток для поллинга файлов, чтобы не тормозил UI ---
+class ScannerThread(QThread):
+    scan_finished = pyqtSignal(dict, bool)  # Возвращает (словарь_mtimes, есть_ли_изменения)
+
+    def __init__(self, project_path, allowed_extensions, last_mtimes):
+        super().__init__()
+        self.project_path = project_path
+        self.allowed_extensions = allowed_extensions
+        self.last_mtimes = last_mtimes
+
+    def run(self):
+        has_changes = False
+        current_mtimes = {}
+        
+        for root, dirs, files in os.walk(self.project_path):
+            # Игнорируем тяжелые системные папки, чтобы не грузить диск
+            dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ('venv', '__pycache__', 'node_modules')]
+            for f in files:
+                ext = os.path.splitext(f)[1].lower()
+                if ext in self.allowed_extensions:
+                    path = os.path.join(root, f)
+                    try:
+                        mtime = os.path.getmtime(path)
+                        current_mtimes[path] = mtime
+                        if path not in self.last_mtimes or self.last_mtimes[path] != mtime:
+                            has_changes = True
+                    except OSError:
+                        pass
+                        
+        self.scan_finished.emit(current_mtimes, has_changes)
+
+
 class RagController:
     def __init__(self, main_window):
         self.mw = main_window 
         self.indexer_worker = None
         
-        # --- БРОНЕБОЙНАЯ СИСТЕМА ПОЛЛИНГА (POLLING) ---
-        self.last_mtimes = {} # Словарь: {путь_к_файлу: время_последнего_изменения}
+        self.last_mtimes = {} 
         
-        # Таймер-сканер: тихо проверяет файлы каждые 3 секунды
         self.poll_timer = QTimer()
-        self.poll_timer.timeout.connect(self._scan_all_files)
+        # ИСПРАВЛЕНИЕ: Запускаем скан асинхронно
+        self.poll_timer.timeout.connect(self._start_background_scan)
 
-        # Таймер-предохранитель: ждет 2 секунды после нахождения изменений, 
-        # чтобы ты успел досохранять файл, прежде чем дергать API
         self.debounce_timer = QTimer()
         self.debounce_timer.setSingleShot(True)
         self.debounce_timer.setInterval(2000) 
@@ -30,6 +59,8 @@ class RagController:
             '.py', '.js', '.html', '.css', '.md', '.txt', '.json', 
             '.bat', '.sh', '.cpp', '.h', '.cs', '.java', '.php', '.go', '.rs'
         }
+        
+        self.scanner_thread = None
 
     # ==========================================
     # ИЗВЛЕЧЕНИЕ КОНТЕКСТА (Перенесено из AIController)
@@ -81,8 +112,9 @@ class RagController:
         self.debounce_timer.stop()
         self.last_mtimes.clear()
         
+        # Первичный сбор хешей (оставляем в Main Thread для надежности старта)
         for root, dirs, files in os.walk(self.mw.project_path):
-            dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ('venv', '__pycache__')]
+            dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ('venv', '__pycache__', 'node_modules')]
             for f in files:
                 ext = os.path.splitext(f)[1].lower()
                 if ext in self.allowed_extensions:
@@ -94,24 +126,17 @@ class RagController:
                         
         self.poll_timer.start(3000)
 
-    def _scan_all_files(self):
-        has_changes = False
-        current_mtimes = {}
-        
-        for root, dirs, files in os.walk(self.mw.project_path):
-            dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ('venv', '__pycache__')]
-            for f in files:
-                ext = os.path.splitext(f)[1].lower()
-                if ext in self.allowed_extensions:
-                    path = os.path.join(root, f)
-                    try:
-                        mtime = os.path.getmtime(path)
-                        current_mtimes[path] = mtime
-                        if path not in self.last_mtimes or self.last_mtimes[path] != mtime:
-                            has_changes = True
-                    except OSError:
-                        pass
+    # ИСПРАВЛЕНИЕ: Безопасный запуск потока
+    def _start_background_scan(self):
+        # Пропускаем такт, если старый скан еще не завершился (защита от наслоения потоков)
+        if self.scanner_thread and self.scanner_thread.isRunning():
+            return
+            
+        self.scanner_thread = ScannerThread(self.mw.project_path, self.allowed_extensions, self.last_mtimes)
+        self.scanner_thread.scan_finished.connect(self._on_scan_finished)
+        self.scanner_thread.start()
 
+    def _on_scan_finished(self, current_mtimes, has_changes):
         if has_changes:
             self.last_mtimes = current_mtimes
             self.debounce_timer.start()
@@ -119,7 +144,7 @@ class RagController:
     # ==========================================
     # УПРАВЛЕНИЕ ИНДЕКСАЦИЕЙ
     # ==========================================
-    def show_analytics(self, pos):
+    def show_analytics(self):
         db = VectorDatabase(self.mw.project_path)
         dlg = RAGAnalyticsDialog(self.mw, vector_db=db, settings=self.mw.settings)
         dlg.exec()

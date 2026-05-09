@@ -21,7 +21,7 @@ class AIController(QObject):
         self.orchestrator = AIOrchestrator()
         self.bridge = VibeBridge()
         self.mcp_manager = MCPManager(self.mw.project_path)
-        self.context_builder = ContextBuilder(self) # <-- ПОДКЛЮЧАЕМ СБОРЩИК
+        self.context_builder = ContextBuilder(self)
         
         self.bridge.on_result_received = lambda text: self.ai_response_signal.emit(text)
         self.bridge.on_limit_reached = lambda: self.limit_reached_signal.emit()
@@ -195,6 +195,9 @@ class AIController(QObject):
         else:
             self.execute_api_task(engine_data.get("provider_id"), engine_data.get("model"), sys_prompt="Ты — координатор проекта. Формируй брифы четко.")
 
+    # =========================================================================
+    # ИСПРАВЛЕНИЕ: Гибридный фоллбэк (текст + VFS)
+    # =========================================================================
     def send_requested_files(self, file_paths):
         engine_data = self.mw.get_selected_engine_data()
         is_browser = engine_data.get("provider_id", "Browser") == "Browser"
@@ -203,35 +206,39 @@ class AIController(QObject):
         self.mw.chat_history.append(f"<br><div style='color: #858585; font-size: 13px; margin-left: 10px;'>[СИСТЕМА] Автоматически отправлены: {', '.join(file_paths)}</div>")
         self.mw.scroll_chat()
 
-        if is_browser:
-            image_payload = []
-            for path in file_paths:
-                content = self.mw.get_file_content_safe(path)
-                if content:
+        marker = '`' * 3
+        attached_text_blocks = []
+        image_payload = []
+
+        for path in file_paths:
+            content = self.mw.get_file_content_safe(path)
+            if content:
+                # Формируем текстовый блок для прямой видимости ИИ
+                attached_text_blocks.append(f"### ФАЙЛ: {path} ###\n{marker}python\n{content}\n{marker}")
+                
+                # Для браузера дополнительно сохраняем как VFS-вложение (для красивых плашек)
+                if is_browser:
                     b64_data = base64.b64encode(content.encode('utf-8')).decode('utf-8')
                     image_payload.append({"mime": "text/plain", "data": b64_data, "name": os.path.basename(path)})
+            else:
+                attached_text_blocks.append(f"### ФАЙЛ: {path} ###\n[ФАЙЛ НЕ НАЙДЕН ИЛИ ПУСТ]")
 
-            system_text = "[СИСТЕМНОЕ СООБЩЕНИЕ]\nПользователь предоставил запрошенные файлы. Они прикреплены к этому сообщению.\nПроанализируй их и выполни предыдущую задачу. Не забывай отвечать в формате JSON Оркестратора."
-            self.mw.last_full_prompt = system_text
+        # Текст промпта теперь ГАРАНТИРОВАННО содержит исходный код
+        system_text = (
+            "[СИСТЕМНОЕ СООБЩЕНИЕ: ПОЛЬЗОВАТЕЛЬ ПРЕДОСТАВИЛ ЗАПРОШЕННЫЕ ФАЙЛЫ]\n\n" 
+            + "\n\n".join(attached_text_blocks) + 
+            "\n\nПроанализируй эти файлы и выполни предыдущую задачу. Не забывай отвечать СТРОГО в формате JSON Оркестратора."
+        )
+        
+        self.mw.last_full_prompt = system_text
 
+        if is_browser:
             self.mw.tokens_sent += self.estimate_tokens(self.mw.last_full_prompt)
             self.mw.update_status_bar()
             self.retry_count = 0
-
             self.bridge.add_task(self.mw.last_full_prompt, target_id=self.mw.get_current_target_id(), images=image_payload)
-            self.mw.log_system("Файлы отправлены как вложения. Ожидание ответа...")
+            self.mw.log_system("Файлы отправлены с дублированием текста в промпт. Ожидание ответа...")
         else:
-            marker = '`' * 3
-            attached_blocks = []
-            for path in file_paths:
-                content = self.mw.get_file_content_safe(path)
-                if content: 
-                    attached_blocks.append(f"### ФАЙЛ: {path} ###\n{marker}\n{content}\n{marker}")
-                else:
-                    attached_blocks.append(f"### ФАЙЛ: {path} ###\n[ФАЙЛ НЕ НАЙДЕН ИЛИ ПУСТ]")
-            
-            system_text = "[СИСТЕМНОЕ СООБЩЕНИЕ: ПОЛЬЗОВАТЕЛЬ ПРЕДОСТАВИЛ ЗАПРОШЕННЫЕ ФАЙЛЫ]\n\n" + "\n\n".join(attached_blocks) + "\n\nПроанализируй их и выполни предыдущую задачу."
-            
             self.mw.last_full_prompt = self.orchestrator.format_request(user_prompt=system_text, project_path=self.mw.project_path, current_file_path=self.mw.current_file_path, file_content="")
             self.mw.tokens_sent += self.estimate_tokens(self.mw.last_full_prompt)
             self.mw.update_status_bar()
@@ -467,11 +474,15 @@ class AIController(QObject):
                             self.mw.log_system(f"ИИ ОШИБСЯ С КОНТЕКСТОМ! Блок не найден в {rel_path}. Запрос переделки...", color="#ffaa00", is_bold=True)
                             self.retry_count += 1
                             marker = '`' * 3
+                            
+                            # ИСПРАВЛЕНИЕ: При ошибке Smart Diff мы ПОВТОРНО вливаем актуальный код файла текстом
                             error_prompt = (
                                 "Твой ответ отклонен системой (Smart Diff Error).\n"
                                 f"Я не нашел следующий блок 'search' в файле {rel_path}:\n"
-                                f"{marker}python\n{failed_search_block}\n{marker}\n"
-                                "Пожалуйста, скопируй ТОЧНЫЕ строки из моего исходного файла в поле 'search'. Или оставь 'search' пустым, если пишешь файл с нуля. Повтори JSON."
+                                f"{marker}python\n{failed_search_block}\n{marker}\n\n"
+                                f"ВОТ АКТУАЛЬНОЕ СОДЕРЖИМОЕ ФАЙЛА {rel_path} ДЛЯ СПРАВКИ:\n"
+                                f"{marker}python\n{patched_code}\n{marker}\n\n"
+                                "Пожалуйста, скопируй ТОЧНЫЕ строки из этого исходного файла в поле 'search'. Или оставь 'search' пустым, если пишешь файл с нуля. Повтори JSON."
                             )
                             self.agent_trace.append({"title": f"Запрос переделки Smart Diff (Попытка {self.retry_count})", "content": error_prompt})
                             

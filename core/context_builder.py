@@ -32,6 +32,8 @@ class ContextBuilder:
             self.mw.log_system("💬 Режим чата: умный RAG-поиск отключен.")
 
         # 3. Прикрепленные файлы кода (@теги)
+        # ИСПРАВЛЕНИЕ: Теперь код явно прикрепленных файлов ВСЕГДА извлекается в виде текста,
+        # независимо от режима (API или Браузер), чтобы ИИ не ослеп.
         attached_blocks_text = []
         tags_in_text = re.findall(r'@\[.*?\]|@[\w\.\-\/\\]+', user_text)
         for tag in tags_in_text:
@@ -39,12 +41,13 @@ class ContextBuilder:
             if fname in self.mw.attached_files:
                 content = self.mw.get_file_content_safe(fname)
                 if content:
+                    marker = '`' * 3
+                    attached_blocks_text.append(f"### ФАЙЛ: {fname} ###\n{marker}python\n{content}\n{marker}")
+                    
+                    # Для браузера дополнительно кидаем в VFS для отрисовки красивого чипа в UI
                     if is_browser:
                         b64_content = base64.b64encode(content.encode('utf-8')).decode('utf-8')
                         image_payload.append({"mime": "text/plain", "data": b64_content, "name": os.path.basename(fname)})
-                    else:
-                        marker = '`' * 3
-                        attached_blocks_text.append(f"### ФАЙЛ: {fname} ###\n{marker}\n{content}\n{marker}")
 
         # 4. MCP Инструменты
         tools_instruction = ""
@@ -65,11 +68,15 @@ class ContextBuilder:
         # МАРШРУТ А: Для веб-браузера (VFS)
         # ==================================
         if is_browser:
+            # Добавляем текстовые блоки прикрепленных файлов прямо в промпт
+            enriched_user_text = user_text
+            if attached_blocks_text:
+                enriched_user_text += "\n\n[СИСТЕМНЫЙ БЛОК: ИСХОДНЫЙ КОД ПРИКРЕПЛЕННЫХ ФАЙЛОВ]\n" + "\n\n".join(attached_blocks_text) + "\n[КОНЕЦ СИСТЕМНОГО БЛОКА]"
+
             if is_coding_mode:
-                # ИСПРАВЛЕНИЕ: Легкие правила JSON вставляем прямо в текст, чтобы ИИ их не потерял
                 core_rules = tools_instruction + self.ctrl.orchestrator.system_prompt
                 
-                # А вот тяжелые данные пакуем в файлы
+                # Тяжелые данные пакуем в VFS-файлы, чтобы не грузить браузер
                 if rag_context_str:
                     b64_rag = base64.b64encode(rag_context_str.encode('utf-8')).decode('utf-8')
                     image_payload.append({"mime": "text/plain", "data": b64_rag, "name": "rag_context.txt"})
@@ -78,10 +85,10 @@ class ContextBuilder:
                 b64_state = base64.b64encode(state_text.encode('utf-8')).decode('utf-8')
                 image_payload.append({"mime": "text/plain", "data": b64_state, "name": "project_state.txt"})
 
-                final_prompt_text = core_rules + "\n\n=== ЗАДАЧА ПОЛЬЗОВАТЕЛЯ ===\n" + user_text + "\n\n[СИСТЕМНОЕ НАПОМИНАНИЕ: Структура папок, твой код и RAG-контекст прикреплены к этому сообщению в виде файлов (rag_context.txt и project_state.txt). Обязательно прочитай их, если они есть. Отвечай СТРОГО в формате JSON Оркестратора.]"
+                final_prompt_text = core_rules + "\n\n=== ЗАДАЧА ПОЛЬЗОВАТЕЛЯ ===\n" + enriched_user_text + "\n\n[СИСТЕМНОЕ НАПОМИНАНИЕ: Структура папок и RAG-контекст прикреплены в виде файлов (rag_context.txt и project_state.txt). Отвечай СТРОГО в формате JSON Оркестратора.]"
             else:
                 chat_rules = tools_instruction + "Ты — умный AI-помощник разработчика. Отвечай на вопросы пользователя в свободном формате (Markdown). Пиши понятно, приводи примеры кода, если нужно. НИКАКИХ JSON-структур."
-                final_prompt_text = chat_rules + "\n\n=== ВОПРОС ПОЛЬЗОВАТЕЛЯ ===\n" + user_text + "\n\n[СИСТЕМНОЕ НАПОМИНАНИЕ: Мы находимся в режиме 'Чат'. Отвечай обычным текстом (Markdown), JSON-структура НЕ нужна.]"
+                final_prompt_text = chat_rules + "\n\n=== ВОПРОС ПОЛЬЗОВАТЕЛЯ ===\n" + enriched_user_text + "\n\n[СИСТЕМНОЕ НАПОМИНАНИЕ: Мы находимся в режиме 'Чат'. Отвечай обычным текстом (Markdown), JSON-структура НЕ нужна.]"
 
         # ==================================
         # МАРШРУТ Б: Для прямых API

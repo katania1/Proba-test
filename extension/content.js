@@ -297,24 +297,21 @@ function extractGeminiText(element) {
     // 1. Убираем мусор
     clone.querySelectorAll('button, .copy-button, [aria-label*="Copy"]').forEach(btn => btn.remove());
 
-    // 2. ЧИНИМ БЛОКИ КОДА (Именно здесь ломались кавычки!)
+    // 2. ЧИНИМ БЛОКИ КОДА
     let pres = clone.querySelectorAll('pre');
     pres.forEach(pre => {
         let code = pre.innerText || pre.textContent;
-        let lang = 'python'; // Язык по умолчанию
+        let lang = 'python';
         
         let wrapper = pre.closest('.code-block, code-block, [class*="code"]');
         if (wrapper) {
-            // Ищем ТОЛЬКО название языка. Убрали поиск по случайным тегам 'span'!
             let header = wrapper.querySelector('.language-name, .code-block-language');
             if (header && header.innerText) {
-                // Очищаем название языка от лишних символов
                 lang = header.innerText.trim().split('\n')[0].replace(/[^a-zA-Z0-9+#-]/g, '').toLowerCase();
             }
         }
 
         let mdCodeBlock = document.createElement('div');
-        // Строгие кавычки без лишних слов!
         mdCodeBlock.innerText = `\n\n\`\`\`${lang || 'python'}\n${code}\n\`\`\`\n\n`;
         
         if (wrapper && wrapper.parentNode) {
@@ -324,7 +321,7 @@ function extractGeminiText(element) {
         }
     });
 
-    // 3. ВОССТАНАВЛИВАЕМ СПИСКИ (Бронебойный метод)
+    // 3. ВОССТАНАВЛИВАЕМ СПИСКИ
     clone.querySelectorAll('li').forEach(li => {
         if (li.parentNode && li.parentNode.tagName === 'OL') {
             let idx = Array.from(li.parentNode.children).indexOf(li) + 1;
@@ -337,7 +334,6 @@ function extractGeminiText(element) {
     let result = clone.innerText || clone.textContent;
     document.body.removeChild(container);
     
-    // Удаляем лишние пустые строки для красоты
     return result.replace(/\n{3,}/g, '\n\n').trim();
 }
 
@@ -377,7 +373,6 @@ async function checkServer() {
             }
             
             lastProcessedText = ""; currentCandidateText = ""; stableCount = 0;
-            // task.images теперь содержит и реальные картинки, и наши виртуальные файлы с кодом
             await sendToGemini(task.prompt, task.images);
             return;
         }
@@ -448,7 +443,7 @@ async function sendToGemini(text, filesPayload = []) {
             const dt = new DataTransfer();
             files.forEach(f => dt.items.add(f));
             
-            // ХАК 1: Нативная инъекция через React setter (Обход блокировок)
+            // ХАК 1: Нативная инъекция через React setter
             const fileInput = document.querySelector('input[type="file"]');
             if (fileInput) {
                 console.log("VibeCoder: Найдена кнопка загрузки. Выполняю React-инъекцию...");
@@ -456,39 +451,45 @@ async function sendToGemini(text, filesPayload = []) {
                 nativeSetter.call(fileInput, dt.files);
                 fileInput.dispatchEvent(new Event('change', { bubbles: true }));
             } else {
-                // ХАК 2: Эмуляция физического броска файлов в чат (Drag & Drop)
+                // ХАК 2: Эмуляция физического броска файлов
                 console.log("VibeCoder: Использую Drag & Drop инъекцию...");
                 const dropEvent = new DragEvent('drop', {
-                    bubbles: true,
-                    cancelable: true,
-                    dataTransfer: dt
+                    bubbles: true, cancelable: true, dataTransfer: dt
                 });
                 inputArea.dispatchEvent(dropEvent);
             }
             
             console.log("VibeCoder: Файлы отправлены в интерфейс. Жду старта загрузки...");
-            await new Promise(r => setTimeout(r, 1500));
+            await new Promise(r => setTimeout(r, 1500)); // Первичная задержка для старта анимации
             
+            // --- НОВАЯ УМНАЯ ЗАДЕРЖКА ---
             let retries = 0;
             let isUploading = false;
             
-            while (retries < 40) { 
+            while (retries < 40) { // Максимум 20 секунд ожидания
                 await new Promise(r => setTimeout(r, 500));
                 
-                // Ищем крутилки загрузки или счетчики прикрепленных файлов
-                const spinners = document.querySelectorAll('mat-progress-spinner, .gmat-mdc-progress-spinner, [aria-label="Loading"], .uploader-progress');
+                // Проверяем наличие лоадеров
+                const spinners = document.querySelectorAll('mat-progress-spinner, .gmat-mdc-progress-spinner, [aria-label="Loading"], .uploader-progress, [role="progressbar"]');
+                
+                // Проверяем состояние кнопки отправки
+                const sendBtnForCheck = document.querySelector('button[aria-label*="Send"], button[aria-label*="Отправить"], [data-testid="send-button"], .send-button');
+                const isBtnDisabled = sendBtnForCheck && (sendBtnForCheck.disabled || sendBtnForCheck.getAttribute('aria-disabled') === 'true');
                 
                 if (spinners.length > 0) {
                     isUploading = true;
-                } else if (isUploading && spinners.length === 0) {
-                    console.log("VibeCoder: Загрузка файлов успешно завершена на серверах Google.");
+                } else if (isUploading && spinners.length === 0 && !isBtnDisabled) {
+                    console.log("VibeCoder: Загрузка файлов успешно завершена, кнопка разблокирована.");
                     break;
-                } else if (retries > 6 && spinners.length === 0) {
-                    // Если спиннеры так и не появились за 3 секунды - значит файл залетел мгновенно
+                } else if (retries > 6 && spinners.length === 0 && !isBtnDisabled) {
+                    // Если спиннеров нет вообще, но кнопка активна - файл залетел мгновенно
+                    console.log("VibeCoder: Файлы загружены мгновенно.");
                     break;
                 }
                 retries++;
             }
+            // -----------------------------
+            
         } catch (err) {
             console.error("VibeCoder: Критическая ошибка при инъекции файлов:", err);
         }
@@ -509,9 +510,11 @@ async function sendToGemini(text, filesPayload = []) {
         if (sendBtn && !sendBtn.disabled) {
             console.log("VibeCoder: Нажатие кнопки Отправить.");
             sendBtn.click();
+        } else {
+            console.warn("VibeCoder: Кнопка Отправить всё еще заблокирована перед кликом!");
         }
         setTimeout(() => { isProcessing = false; stableCount = 0; }, 2000);
-    }, 500);
+    }, 800); // Чуть увеличен финальный таймаут перед кликом для надежности
 }
 
 setInterval(checkServer, 3000);
