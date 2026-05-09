@@ -113,6 +113,20 @@ class MCPManager:
                         "required": ["db_filename", "query"]
                     }
                 }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "run_terminal_command",
+                    "description": "Выполняет команду в системном терминале (например: pip install, git status, pytest). Работает в безопасном режиме (песочница).",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "command": {"type": "string", "description": "Системная команда для выполнения в терминале"}
+                        },
+                        "required": ["command"]
+                    }
+                }
             }
         ]
 
@@ -165,6 +179,8 @@ class MCPManager:
                 return self._tool_web_search(**kwargs)
             elif tool_name == "execute_sql":
                 return self._tool_execute_sql(**kwargs)
+            elif tool_name == "run_terminal_command":
+                return self._tool_run_terminal_command(**kwargs)
                 
             # Если это не наш инструмент, перенаправляем команду во внешний MCP сервер
             elif self.external_client:
@@ -183,6 +199,44 @@ class MCPManager:
     # ==========================================
     # РЕАЛИЗАЦИЯ ЛОКАЛЬНЫХ ИНСТРУМЕНТОВ
     # ==========================================
+
+    def _tool_run_terminal_command(self, command):
+        """Безопасная песочница для выполнения терминальных команд"""
+        # 1. Жесткий Blacklist опасных команд
+        forbidden_keywords = [
+            'rm ', 'del ', 'format ', 'shutdown', 'reboot', 'mkfs', 
+            '>', '>>', 'chmod', 'chown', 'kill', 'taskkill', 'curl ', 'wget '
+        ]
+        
+        cmd_lower = command.lower()
+        for word in forbidden_keywords:
+            if word in cmd_lower:
+                return f"⛔ КОМАНДА ЗАБЛОКИРОВАНА (Сработала защита Песочницы): Использование конструкции '{word}' запрещено в целях безопасности."
+
+        # 2. Выполнение с Таймаутом
+        try:
+            # Запускаем строго в папке проекта
+            result = subprocess.run(
+                command,
+                shell=True,
+                cwd=self.project_path,
+                capture_output=True,
+                text=True,
+                timeout=15  # Максимум 15 секунд на команду
+            )
+            
+            output = result.stdout.strip()
+            error_output = result.stderr.strip()
+            
+            if result.returncode == 0:
+                return f"✅ Успешно:\n{output}" if output else "✅ Команда выполнена успешно (без вывода)."
+            else:
+                return f"❌ Ошибка (Код {result.returncode}):\n{error_output}\n{output}"
+                
+        except subprocess.TimeoutExpired:
+            return "⏳ ВРЕМЯ ОЖИДАНИЯ ВЫШЛО: Команда зависла или требует ручного ввода (таймаут 15 секунд). Процесс прерван."
+        except Exception as e:
+            return f"⚠️ Системная ошибка при выполнении: {str(e)}"
 
     def _tool_web_search(self, query):
         url = "https://lite.duckduckgo.com/lite/"

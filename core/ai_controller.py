@@ -1,5 +1,6 @@
 import os
 import base64
+import hashlib
 from PyQt6.QtCore import QObject, pyqtSignal, QSettings
 from PyQt6.QtWidgets import QMessageBox, QApplication, QDialog
 
@@ -21,7 +22,7 @@ class AIController(QObject):
         self.orchestrator = AIOrchestrator()
         self.bridge = VibeBridge()
         self.mcp_manager = MCPManager(self.mw.project_path)
-        self.context_builder = ContextBuilder(self)
+        self.context_builder = ContextBuilder(self) 
         
         self.bridge.on_result_received = lambda text: self.ai_response_signal.emit(text)
         self.bridge.on_limit_reached = lambda: self.limit_reached_signal.emit()
@@ -36,12 +37,76 @@ class AIController(QObject):
         self.browser_mcp_step = 0
         self.max_browser_mcp_steps = 5
         self.agent_trace = []
+        
+        # --- ПАМЯТЬ ДЛЯ ДЕТЕКТОРА "ДНЯ СУРКА" ---
+        self.auto_heal_attempts = 0
+        self.last_tool_result_hash = None
+        self.last_tool_name = None
 
     def start(self):
         self.bridge.start_server()
 
     def estimate_tokens(self, text):
         return int(len(text) / 2.5)
+
+    # =========================================================
+    # ФАЗА 29: ПЕРЕХВАТЧИК ОШИБОК ИЗ ТЕРМИНАЛА
+    # =========================================================
+    def handle_terminal_error(self, error_text):
+        """Принимает сигнал от терминала и запускает цикл авто-лечения"""
+        engine_data = self.mw.get_selected_engine_data()
+        is_browser = engine_data.get("provider_id", "Browser") == "Browser"
+
+        # 1. Красивое визуальное отображение в чате
+        self.mw.chat_logger.log("SYSTEM", f"Перехват ошибки терминала:\n{error_text}")
+        
+        safe_error = error_text.replace('<', '&lt;').replace('>', '&gt;').replace('\n', '<br>')
+        ui_alert = (
+            f"<div style='border: 1px solid #d32f2f; background-color: #3b1b1b; padding: 10px; border-radius: 5px; margin: 10px 0;'>"
+            f"<b style='color: #ff4444;'>🚨 [АВТО-ОТЛАДКА] Перехвачена ошибка из системного терминала:</b><br><br>"
+            f"<span style='color: #d4d4d4; font-family: Consolas, monospace; font-size: 12px;'>{safe_error}</span><br><br>"
+            f"<b style='color: #e6a822;'>⚙️ Формирую системную задачу и передаю ИИ...</b>"
+            f"</div>"
+        )
+        self.mw.chat_history.append(ui_alert)
+        self.mw.scroll_chat()
+
+        # 2. Подготовка промпта
+        marker = '`' * 3
+        system_text = (
+            "[СИСТЕМНОЕ СООБЩЕНИЕ: АВТО-ОТЛАДКА]\n"
+            "При выполнении программы в системном терминале произошла ошибка. Вот полный Traceback:\n\n"
+            f"{marker}text\n{error_text}\n{marker}\n\n"
+            "Проанализируй эту ошибку, найди её причину и верни JSON с исправлением кода. "
+            "Если причина в отсутствии библиотеки — вызови инструмент 'run_terminal_command' (pip install ...)."
+        )
+
+        # Сброс состояния агента
+        self.auto_heal_attempts = 0
+        self.last_tool_result_hash = None
+        self.last_tool_name = None
+        self.agent_trace = [{"title": "Перехват ошибки терминала", "content": system_text}]
+
+        # 3. Маршрутизация (Браузер или API)
+        if is_browser:
+            self.mw.last_full_prompt = system_text
+            self.mw.tokens_sent += self.estimate_tokens(self.mw.last_full_prompt)
+            self.mw.update_status_bar()
+            self.retry_count = 0
+            self.bridge.add_task(self.mw.last_full_prompt, target_id=self.mw.get_current_target_id())
+        else:
+            self.mw.last_full_prompt = self.orchestrator.format_request(
+                user_prompt=system_text, 
+                project_path=self.mw.project_path, 
+                current_file_path=self.mw.current_file_path, 
+                file_content=""
+            )
+            self.mw.tokens_sent += self.estimate_tokens(self.mw.last_full_prompt)
+            self.mw.update_status_bar()
+            self.retry_count = 0 
+            self.execute_api_task(engine_data.get("provider_id"), engine_data.get("model"))
+
+    # =========================================================
 
     def send_task(self, is_coding_mode=True):
         user_text = self.mw.prompt_input.toPlainText().strip()
@@ -63,13 +128,13 @@ class AIController(QObject):
             self.mw.show_popup("Ошибка связи", "Нет активных вкладок браузера!", is_error=True)
             return
 
-        # ==========================================
-        # 🧠 СОБИРАЕМ КОНТЕКСТ ЧЕРЕЗ БИЛДЕР
-        # ==========================================
+        self.auto_heal_attempts = 0
+        self.last_tool_result_hash = None
+        self.last_tool_name = None
+
         payload = self.context_builder.build_payload(user_text, is_coding_mode, is_browser)
         self.mw.last_full_prompt = payload["text"]
 
-        # Логирование в UI
         self.mw.chat_logger.log("USER", user_text)
         tab_display_name = selected_tab.split(" [")[0].replace("🟢 ", "") if is_browser else selected_model
         media_notice = f" <i>(+ {len(payload['image_paths'])} картинки)</i>" if payload['image_paths'] else ""
@@ -85,9 +150,6 @@ class AIController(QObject):
         self.mw.prompt_input.clear()
         self.mw.attachment_panel.clear() 
 
-        # ==========================================
-        # 🚀 МАРШРУТИЗАЦИЯ И ОТПРАВКА
-        # ==========================================
         if is_browser:
             self.browser_mcp_step = 0
             self.bridge.add_task(self.mw.last_full_prompt, is_relay=False, target_id=target_id, images=payload["images"])
@@ -195,9 +257,6 @@ class AIController(QObject):
         else:
             self.execute_api_task(engine_data.get("provider_id"), engine_data.get("model"), sys_prompt="Ты — координатор проекта. Формируй брифы четко.")
 
-    # =========================================================================
-    # ИСПРАВЛЕНИЕ: Гибридный фоллбэк (текст + VFS)
-    # =========================================================================
     def send_requested_files(self, file_paths):
         engine_data = self.mw.get_selected_engine_data()
         is_browser = engine_data.get("provider_id", "Browser") == "Browser"
@@ -206,39 +265,35 @@ class AIController(QObject):
         self.mw.chat_history.append(f"<br><div style='color: #858585; font-size: 13px; margin-left: 10px;'>[СИСТЕМА] Автоматически отправлены: {', '.join(file_paths)}</div>")
         self.mw.scroll_chat()
 
-        marker = '`' * 3
-        attached_text_blocks = []
-        image_payload = []
-
-        for path in file_paths:
-            content = self.mw.get_file_content_safe(path)
-            if content:
-                # Формируем текстовый блок для прямой видимости ИИ
-                attached_text_blocks.append(f"### ФАЙЛ: {path} ###\n{marker}python\n{content}\n{marker}")
-                
-                # Для браузера дополнительно сохраняем как VFS-вложение (для красивых плашек)
-                if is_browser:
+        if is_browser:
+            image_payload = []
+            for path in file_paths:
+                content = self.mw.get_file_content_safe(path)
+                if content:
                     b64_data = base64.b64encode(content.encode('utf-8')).decode('utf-8')
                     image_payload.append({"mime": "text/plain", "data": b64_data, "name": os.path.basename(path)})
-            else:
-                attached_text_blocks.append(f"### ФАЙЛ: {path} ###\n[ФАЙЛ НЕ НАЙДЕН ИЛИ ПУСТ]")
 
-        # Текст промпта теперь ГАРАНТИРОВАННО содержит исходный код
-        system_text = (
-            "[СИСТЕМНОЕ СООБЩЕНИЕ: ПОЛЬЗОВАТЕЛЬ ПРЕДОСТАВИЛ ЗАПРОШЕННЫЕ ФАЙЛЫ]\n\n" 
-            + "\n\n".join(attached_text_blocks) + 
-            "\n\nПроанализируй эти файлы и выполни предыдущую задачу. Не забывай отвечать СТРОГО в формате JSON Оркестратора."
-        )
-        
-        self.mw.last_full_prompt = system_text
+            system_text = "[СИСТЕМНОЕ СООБЩЕНИЕ]\nПользователь предоставил запрошенные файлы. Они прикреплены к этому сообщению.\nПроанализируй их и выполни предыдущую задачу. Не забывай отвечать в формате JSON Оркестратора."
+            self.mw.last_full_prompt = system_text
 
-        if is_browser:
             self.mw.tokens_sent += self.estimate_tokens(self.mw.last_full_prompt)
             self.mw.update_status_bar()
             self.retry_count = 0
+
             self.bridge.add_task(self.mw.last_full_prompt, target_id=self.mw.get_current_target_id(), images=image_payload)
-            self.mw.log_system("Файлы отправлены с дублированием текста в промпт. Ожидание ответа...")
+            self.mw.log_system("Файлы отправлены как вложения. Ожидание ответа...")
         else:
+            marker = '`' * 3
+            attached_blocks = []
+            for path in file_paths:
+                content = self.mw.get_file_content_safe(path)
+                if content: 
+                    attached_blocks.append(f"### ФАЙЛ: {path} ###\n{marker}\n{content}\n{marker}")
+                else:
+                    attached_blocks.append(f"### ФАЙЛ: {path} ###\n[ФАЙЛ НЕ НАЙДЕН ИЛИ ПУСТ]")
+            
+            system_text = "[СИСТЕМНОЕ СООБЩЕНИЕ: ПОЛЬЗОВАТЕЛЬ ПРЕДОСТАВИЛ ЗАПРОШЕННЫЕ ФАЙЛЫ]\n\n" + "\n\n".join(attached_blocks) + "\n\nПроанализируй их и выполни предыдущую задачу."
+            
             self.mw.last_full_prompt = self.orchestrator.format_request(user_prompt=system_text, project_path=self.mw.project_path, current_file_path=self.mw.current_file_path, file_content="")
             self.mw.tokens_sent += self.estimate_tokens(self.mw.last_full_prompt)
             self.mw.update_status_bar()
@@ -347,12 +402,35 @@ class AIController(QObject):
             self.mw.scroll_chat()
 
             if self.browser_mcp_step > self.max_browser_mcp_steps:
-                self.mw.log_system("⚠️ Лимит шагов превышен. Запрашиваю финал.", color="#ffaa00", is_bold=True)
-                self.bridge.add_task("Лимит превышен. Дай финальный ответ.", target_id=self.mw.get_current_target_id())
+                self.mw.log_system("⚠️ Лимит шагов агента исчерпан. Запрашиваю финал.", color="#ffaa00", is_bold=True)
+                self.bridge.add_task("Лимит шагов агента исчерпан. Дай финальный ответ на основе того, что успел узнать.", target_id=self.mw.get_current_target_id())
                 return
                 
             tool_result = self.mcp_manager.execute_tool(tool_name, args)
-            next_prompt = f"Результат выполнения '{tool_name}':\n---\n{tool_result}\n---\n\nЕсли информации достаточно, дай финальный ответ."
+            
+            # --- ИНТЕГРАЦИЯ: ДЕТЕКТОР "ДНЯ СУРКА" (ANTI-LOOP SYSTEM) ---
+            current_hash = hashlib.md5(tool_result.encode('utf-8')).hexdigest()
+            warning_block = ""
+            
+            if "❌ Ошибка" in tool_result or "⚠️ Системная ошибка" in tool_result or "⛔ КОМАНДА ЗАБЛОКИРОВАНА" in tool_result:
+                if self.last_tool_name == tool_name and self.last_tool_result_hash == current_hash:
+                    self.auto_heal_attempts += 1
+                    warning_block = f"\n\n🚨 [КРИТИЧЕСКОЕ СИСТЕМНОЕ ПРЕДУПРЕЖДЕНИЕ: ДЕНЬ СУРКА]\nТВОЕ ПРЕДЫДУЩЕЕ ДЕЙСТВИЕ ВЫЗВАЛО АБСОЛЮТНО ТУ ЖЕ ОШИБКУ (Попытка {self.auto_heal_attempts}/3).\nПРАВИЛО: ПРИДУМАЙ ПРИНЦИПИАЛЬНО ДРУГОЙ ПОДХОД. Хватит повторять ту же команду!"
+                    
+                    if self.auto_heal_attempts >= 3:
+                        self.mw.log_system("⚠️ ИИ зациклился на одной ошибке. Принудительное прерывание агента.", color="#ff4444", is_bold=True)
+                        self.bridge.add_task("Я застрял в бесконечном цикле одних и тех же ошибок. Дай финальный ответ текстом: 'Я не смог решить проблему автоматически, нужна помощь человека'.", target_id=self.mw.get_current_target_id())
+                        return
+                else:
+                    self.auto_heal_attempts = 1
+            else:
+                self.auto_heal_attempts = 0
+                
+            self.last_tool_name = tool_name
+            self.last_tool_result_hash = current_hash
+            # -----------------------------------------------------------
+
+            next_prompt = f"Результат выполнения '{tool_name}':\n---\n{tool_result}\n---{warning_block}\n\nЕсли информации достаточно, дай финальный ответ. Иначе - вызови следующий инструмент."
             
             self.agent_trace.append({"title": f"Результат '{tool_name}'", "content": next_prompt})
             self.mw.chat_history.append(f"<div style='color: #858585; font-size: 12px; margin-left: 20px;'>📥 Данные получены, жду решения ИИ...</div>")
@@ -474,15 +552,11 @@ class AIController(QObject):
                             self.mw.log_system(f"ИИ ОШИБСЯ С КОНТЕКСТОМ! Блок не найден в {rel_path}. Запрос переделки...", color="#ffaa00", is_bold=True)
                             self.retry_count += 1
                             marker = '`' * 3
-                            
-                            # ИСПРАВЛЕНИЕ: При ошибке Smart Diff мы ПОВТОРНО вливаем актуальный код файла текстом
                             error_prompt = (
                                 "Твой ответ отклонен системой (Smart Diff Error).\n"
                                 f"Я не нашел следующий блок 'search' в файле {rel_path}:\n"
-                                f"{marker}python\n{failed_search_block}\n{marker}\n\n"
-                                f"ВОТ АКТУАЛЬНОЕ СОДЕРЖИМОЕ ФАЙЛА {rel_path} ДЛЯ СПРАВКИ:\n"
-                                f"{marker}python\n{patched_code}\n{marker}\n\n"
-                                "Пожалуйста, скопируй ТОЧНЫЕ строки из этого исходного файла в поле 'search'. Или оставь 'search' пустым, если пишешь файл с нуля. Повтори JSON."
+                                f"{marker}python\n{failed_search_block}\n{marker}\n"
+                                "Пожалуйста, скопируй ТОЧНЫЕ строки из моего исходного файла в поле 'search'. Или оставь 'search' пустым, если пишешь файл с нуля. Повтори JSON."
                             )
                             self.agent_trace.append({"title": f"Запрос переделки Smart Diff (Попытка {self.retry_count})", "content": error_prompt})
                             

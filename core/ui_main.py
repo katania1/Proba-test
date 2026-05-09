@@ -257,7 +257,7 @@ class MainWindow(QMainWindow):
         
         self.terminal = TerminalWidget(self.project_path)
         self.terminal.setVisible(False) 
-        self.terminal.ai_fix_requested.connect(self.handle_terminal_error)
+       
         
         self.editor_splitter.addWidget(self.terminal)
         self.editor_splitter.setSizes([700, 300]) 
@@ -310,6 +310,9 @@ class MainWindow(QMainWindow):
 
         self.ai_controller = AIController(self)
         self.ai_controller.start()
+        
+        # Подключаем сигнал терминала ЗДЕСЬ, когда "Мозги" уже созданы!
+        self.terminal.ai_fix_requested.connect(self.ai_controller.handle_terminal_error)
         
         self.bottom_panel.update_mcp_status(
             self.ai_controller.mcp_manager.status, 
@@ -645,37 +648,7 @@ class MainWindow(QMainWindow):
         scrollbar = self.chat_history.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
-    def handle_terminal_error(self, error_text):
-        file_paths = re.findall(r'File "(.*?)", line', error_text)
-        
-        culprit_file = None
-        for path in reversed(file_paths):
-            norm_path = os.path.normpath(path)
-            if norm_path.startswith(os.path.normpath(self.project_path)):
-                culprit_file = norm_path
-                break
-                
-        marker = '`' * 3
-        fix_prompt = (
-            f"В моем коде произошла ошибка во время выполнения. "
-            f"Проанализируй этот Traceback, определи проблемный файл и причину.\n\n"
-            f"Лог терминала:\n"
-            f"{marker}\n{error_text}\n{marker}\n\n"
-            f"Пришли мне JSON с командой поиска и замены (search/replace) для ее исправления."
-        )
-        self.prompt_input.setPlainText(fix_prompt)
-        
-        if culprit_file:
-            rel_path = os.path.relpath(culprit_file, self.project_path)
-            self.attached_files.add(rel_path)
-            self.attachment_panel.add_attachment(culprit_file)
-            self.prompt_input.highlighter.rehighlight()
-            
-            self.log_system(f"🩺 Терминал поймал ошибку! Файл {rel_path} прикреплен автоматически.", color="#d32f2f", is_bold=True)
-        else:
-            self.log_system("🩺 Терминал поймал ошибку, но файл не найден. Промпт сформирован.", color="#d32f2f", is_bold=True)
-
-        self.btn_code.click()
+    
         
     def close_tab(self, index):
         widget = self.editor_tabs.widget(index)
