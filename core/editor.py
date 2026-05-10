@@ -9,7 +9,6 @@ class SearchPanel(QWidget):
         super().__init__(editor)
         self.editor = editor
         
-        # ИСПРАВЛЕНИЕ: Делаем панель ярче и контрастнее (синяя рамка, фон светлее)
         self.setStyleSheet("""
             SearchPanel {
                 background-color: #2d2d30; 
@@ -22,7 +21,6 @@ class SearchPanel(QWidget):
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(6)
 
-        # ИСПРАВЛЕНИЕ: Увеличиваем размер шрифта и отступы внутри поля ввода
         self.search_input = QLineEdit()
         self.search_input.setStyleSheet("""
             QLineEdit {
@@ -36,11 +34,10 @@ class SearchPanel(QWidget):
                 font-weight: bold;
             }
         """)
-        self.search_input.setPlaceholderText("Найти (Enter - Вниз, Shift+Enter - Вверх)...")
+        self.search_input.setPlaceholderText("Найти...")
         self.search_input.setMinimumWidth(320)
         self.search_input.setMinimumHeight(32)
 
-        # ИСПРАВЛЕНИЕ: Надежные текстовые кнопки вместо невидимых эмодзи
         self.btn_prev = QPushButton("Вверх")
         self.btn_next = QPushButton("Вниз")
         self.btn_close = QPushButton("X")
@@ -65,7 +62,7 @@ class SearchPanel(QWidget):
             btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
         self.btn_close.setFixedWidth(35)
-        self.btn_close.setStyleSheet(btn_style.replace("#0e639c", "#d32f2f")) # Крестик краснеет при нажатии
+        self.btn_close.setStyleSheet(btn_style.replace("#0e639c", "#d32f2f"))
 
         layout.addWidget(self.search_input)
         layout.addWidget(self.btn_prev)
@@ -74,7 +71,6 @@ class SearchPanel(QWidget):
 
         self.hide()
 
-        # Сигналы
         self.search_input.textChanged.connect(self.on_text_changed)
         self.search_input.returnPressed.connect(self.on_return_pressed)
         self.btn_next.clicked.connect(self.find_next)
@@ -88,19 +84,15 @@ class SearchPanel(QWidget):
             self.find_next()
 
     def toggle_panel(self):
-        if self.isVisible():
-            self.hide_panel()
-        else:
-            self.show_panel()
+        if self.isVisible(): self.hide_panel()
+        else: self.show_panel()
 
     def show_panel(self):
         self.show()
         self.raise_()
-        
         selected_text = self.editor.selectedText()
         if selected_text and '\n' not in selected_text:
             self.search_input.setText(selected_text)
-        
         self.search_input.setFocus()
         self.search_input.selectAll()
         self.update_position()
@@ -113,43 +105,19 @@ class SearchPanel(QWidget):
         self.move(self.editor.width() - self.width() - 30, 15)
 
     def on_text_changed(self, text):
-        if text:
-            self.editor.findFirst(text, False, False, False, True, True, 0, 0, True, False)
+        if text: self.editor.findFirst(text, False, False, False, True, True, 0, 0, True, False)
 
     def do_search(self, forward=True):
         text = self.search_input.text()
-        if not text:
-            return
-            
+        if not text: return
         line, index = self.editor.getCursorPosition()
-        
         if self.editor.hasSelectedText():
-            sel_text = self.editor.selectedText()
-            if sel_text.lower() == text.lower():
-                ls, ids, le, ide = self.editor.getSelection()
-                if forward:
-                    line, index = le, ide 
-                else:
-                    line, index = ls, ids 
+            ls, ids, le, ide = self.editor.getSelection()
+            line, index = (le, ide) if forward else (ls, ids)
+        self.editor.findFirst(text, False, False, False, True, forward, line, index, True, False)
 
-        self.editor.findFirst(
-            text,
-            False,  # Regular expression
-            False,  # Case sensitive
-            False,  # Whole word
-            True,   # Wrap around
-            forward,
-            line,
-            index,
-            True,   # Show match
-            False   # Posix
-        )
-
-    def find_next(self):
-        self.do_search(forward=True)
-
-    def find_prev(self):
-        self.do_search(forward=False)
+    def find_next(self): self.do_search(forward=True)
+    def find_prev(self): self.do_search(forward=False)
 
 
 class DarkPythonEditor(QsciScintilla):
@@ -188,7 +156,6 @@ class DarkPythonEditor(QsciScintilla):
         self.setFoldMarginColors(QColor("#252526"), QColor("#252526"))
         
         self.SendScintilla(2162, 16 | 32 | 64) 
-        
         self.SendScintilla(2163, 0)
         
         fold_fg = QColor("#d4d4d4")    
@@ -219,6 +186,7 @@ class DarkPythonEditor(QsciScintilla):
         self.setUnmatchedBraceBackgroundColor(QColor("#252526"))
         self.setUnmatchedBraceForegroundColor(QColor("#ff4444"))
         
+        # ВОССТАНОВЛЕННЫЙ БЛОК ПОДСВЕТКИ КОДА (70 СТРОК)
         self.lexer = QsciLexerPython(self)
         self.lexer.setDefaultFont(font)
         self.lexer.setDefaultPaper(QColor("#1e1e1e"))
@@ -236,13 +204,67 @@ class DarkPythonEditor(QsciScintilla):
         self.lexer.setColor(QColor("#d4d4d4"), QsciLexerPython.Operator)
         
         self.setLexer(self.lexer)
+        
+        # Настройки автодополнения
+        self.setAutoCompletionSource(QsciScintilla.AutoCompletionSource.AcsDocument)
+        self.setAutoCompletionThreshold(2)
+        self.setAutoCompletionCaseSensitivity(False)
+        self.setAutoCompletionReplaceWord(True)
+
+        # --- УМНАЯ КНОПКА ПРЫЖКА (TOP/END) ---
+        self.btn_jump = QPushButton("⬇ END", self)
+        self.btn_jump.setFixedSize(65, 26)
+        self.btn_jump.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_jump.setToolTip("Перейти в конец/начало кода")
+        self.btn_jump.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(30, 30, 30, 180);
+                color: #858585;
+                border: 1px solid #3c3c3c;
+                border-radius: 4px;
+                font-size: 10px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #0e639c;
+                color: white;
+                border-color: #1177bb;
+            }
+        """)
+        self.btn_jump.clicked.connect(self.toggle_jump)
+        self.cursorPositionChanged.connect(self._update_jump_button)
 
         self.search_panel = SearchPanel(self)
+
+    def toggle_jump(self):
+        current_line, _ = self.getCursorPosition()
+        last_line = self.lines() - 1
+
+        if current_line >= last_line - 2:
+            self.setCursorPosition(0, 0)
+            self.ensureLineVisible(0)
+        else:
+            last_index = len(self.text(last_line))
+            self.setCursorPosition(last_line, last_index)
+            self.ensureLineVisible(last_line)
+        self.setFocus()
+
+    def _update_jump_button(self, line, index):
+        if not hasattr(self, 'btn_jump'): return
+        last_line = self.lines() - 1
+        if line >= last_line - 2:
+            if self.btn_jump.text() != "⬆ TOP":
+                self.btn_jump.setText("⬆ TOP")
+        else:
+            if self.btn_jump.text() != "⬇ END":
+                self.btn_jump.setText("⬇ END")
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if hasattr(self, 'search_panel') and self.search_panel.isVisible():
             self.search_panel.update_position()
+        if hasattr(self, 'btn_jump'):
+            self.btn_jump.move(self.width() - 95, self.height() - 45)
 
     def keyPressEvent(self, event):
         if event.modifiers() == Qt.KeyboardModifier.ControlModifier and event.key() == Qt.Key.Key_F:
@@ -253,8 +275,17 @@ class DarkPythonEditor(QsciScintilla):
             self.search_panel.hide_panel()
             return
 
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            line, index = self.getCursorPosition()
+            text_line = self.text(line)
+            super().keyPressEvent(event)
+            if text_line.strip().endswith(':'):
+                indent = self.indentation(line) + self.indentationWidth()
+                self.setIndentation(line + 1, indent)
+                self.setCursorPosition(line + 1, indent)
+            return
+
         char = event.text()
-        
         if char in [')', ']', '}', '"', "'"]:
             line, index = self.getCursorPosition()
             text_line = self.text(line)
@@ -263,7 +294,6 @@ class DarkPythonEditor(QsciScintilla):
                 return
 
         super().keyPressEvent(event)
-        
         if char in ['(', '[', '{', '"', "'"]:
             pairs = {'(': ')', '[': ']', '{': '}', '"': '"', "'": "'"}
             line, index = self.getCursorPosition()

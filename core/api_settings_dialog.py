@@ -4,7 +4,7 @@ from datetime import datetime
 from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton, 
                              QLabel, QLineEdit, QTabWidget, QWidget, QMessageBox, 
                              QListWidget, QListWidgetItem, QInputDialog, QAbstractItemView,
-                             QMenu, QApplication, QTableWidget, QTableWidgetItem, QHeaderView)
+                             QMenu, QApplication, QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox)
 from PyQt6.QtCore import QSettings, QThread, pyqtSignal, Qt, QTimer
 
 from core.providers import OpenAIProvider, AnthropicProvider, GeminiAPIProvider
@@ -185,10 +185,9 @@ class APISettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("⚙️ Настройки API Провайдеров (Pro)")
-        self.resize(650, 750) 
+        self.resize(750, 750) 
         self.setStyleSheet("background-color: #1e1e1e; color: #d4d4d4;")
         
-        # Читаем портативные настройки из config/VibeCoder/API_Config.ini
         self.settings = QSettings("VibeCoder", "API_Config")
         self.workers = [] 
         self.tabs_ui = {} 
@@ -233,7 +232,6 @@ class APISettingsDialog(QDialog):
         
         layout.addWidget(self.tabs)
 
-        # ДОБАВЛЕН ФЛАГ has_embedding_key ДЛЯ OPENAI И GEMINI
         self.create_provider_tab("OpenAI", "🟢 OpenAI", "sk-...", has_base_url=True, has_embedding_key=True)
         self.create_provider_tab("Anthropic", "🟣 Anthropic", "sk-ant-...", has_base_url=True)
         self.create_provider_tab("Gemini", "🤖 Gemini API", "AIzaSy...", has_base_url=False, has_embedding_key=True)
@@ -267,6 +265,105 @@ class APISettingsDialog(QDialog):
         if is_password:
             line_edit.setEchoMode(QLineEdit.EchoMode.Password)
         return line_edit
+
+    # --- ИНТЕГРАЦИЯ УМНЫХ ПОЛЕЙ ВВОДА С ГЛАЗИКОМ ---
+    def _create_secure_input(self, placeholder="", text=""):
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(5)
+        
+        line_edit = QLineEdit()
+        line_edit.setPlaceholderText(placeholder)
+        line_edit.setText(text)
+        line_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        line_edit.setStyleSheet("background-color: #252526; border: 1px solid #3c3c3c; padding: 6px; border-radius: 3px; font-family: Consolas, monospace;")
+        
+        btn_eye = QPushButton("V")
+        btn_eye.setFixedSize(28, 28)
+        btn_eye.setStyleSheet("background-color: #333333; color: white; border-radius: 3px; font-size: 14px; font-weight: bold; padding: 0px;")
+        btn_eye.setCursor(Qt.CursorShape.PointingHandCursor)
+        
+        def toggle_echo():
+            if line_edit.echoMode() == QLineEdit.EchoMode.Password:
+                line_edit.setEchoMode(QLineEdit.EchoMode.Normal)
+                btn_eye.setStyleSheet("background-color: #0e639c; color: white; border-radius: 3px; font-size: 14px; font-weight: bold; padding: 0px;")
+            else:
+                line_edit.setEchoMode(QLineEdit.EchoMode.Password)
+                btn_eye.setStyleSheet("background-color: #333333; color: white; border-radius: 3px; font-size: 14px; font-weight: bold; padding: 0px;")
+                
+        btn_eye.clicked.connect(toggle_echo)
+        
+        layout.addWidget(line_edit)
+        layout.addWidget(btn_eye)
+        container.line_edit = line_edit
+        return container
+
+    # --- НОВЫЙ ДИЗАЙН ПУЛА КЛЮЧЕЙ RAG (JSON-ФОРМАТ) ---
+    def _add_emb_key_row(self, layout, key_data=None):
+        if key_data is None: 
+            key_data = {"key": "", "enabled": True, "comment": ""}
+            
+        row_widget = QWidget()
+        row_layout = QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(8)
+        
+        # 1. Чекбокс активности
+        cb_enabled = QCheckBox()
+        cb_enabled.setChecked(key_data.get("enabled", True))
+        cb_enabled.setToolTip("Использовать этот ключ при индексации")
+        cb_enabled.setStyleSheet("""
+            QCheckBox::indicator { width: 18px; height: 18px; border: 1px solid #888; border-radius: 3px; background-color: #252526; }
+            QCheckBox::indicator:checked { background-color: #31a24c; border: 1px solid #31a24c; }
+        """)
+        row_layout.addWidget(cb_enabled)
+        
+        # 2. Поле ключа (с глазиком)
+        input_container = self._create_secure_input("sk-... (Ключ)", key_data.get("key", ""))
+        row_layout.addWidget(input_container, stretch=3)
+        
+        # 3. Поле комментария
+        le_comment = QLineEdit()
+        le_comment.setPlaceholderText("Комментарий (напр. Студенческий 1)")
+        le_comment.setText(key_data.get("comment", ""))
+        le_comment.setStyleSheet("background-color: #252526; border: 1px solid #3c3c3c; padding: 6px; border-radius: 3px;")
+        row_layout.addWidget(le_comment, stretch=2)
+        
+        # 4. Кнопка удаления
+        btn_del = QPushButton("X")
+        btn_del.setFixedSize(28, 28)
+        btn_del.setStyleSheet("background-color: #512525; color: white; border-radius: 3px; font-size: 14px; font-weight: bold; padding: 0px;")
+        btn_del.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_del.clicked.connect(lambda: self._remove_emb_key_row(row_widget, layout))
+        row_layout.addWidget(btn_del)
+        
+        # Сохраняем ссылки для удобного парсинга при сохранении
+        row_widget.cb_enabled = cb_enabled
+        row_widget.le_key = input_container.line_edit
+        row_widget.le_comment = le_comment
+        
+        layout.addWidget(row_widget)
+
+    def _remove_emb_key_row(self, row_widget, layout):
+        layout.removeWidget(row_widget)
+        row_widget.deleteLater()
+
+    def _load_emb_keys(self, layout, keys_json_str):
+        # Пытаемся загрузить как новый JSON
+        try:
+            keys_data = json.loads(keys_json_str)
+            if not isinstance(keys_data, list):
+                raise ValueError("Неверный формат")
+        except:
+            # Фолбэк (Умная конвертация): если это старая строка через запятую
+            keys_data = [{"key": k.strip(), "enabled": True, "comment": ""} for k in keys_json_str.split(',') if k.strip()]
+            
+        if not keys_data:
+            self._add_emb_key_row(layout)
+        else:
+            for k_data in keys_data:
+                self._add_emb_key_row(layout, k_data)
 
     def _update_item_display(self, item):
         name = item.data(ROLE_NAME)
@@ -306,8 +403,8 @@ class APISettingsDialog(QDialog):
         
         creds_layout = QVBoxLayout()
         
-        # --- БЛОК 1: Основной ключ (Для генерации кода) ---
-        lbl_main_key = QLabel("API Key (Генерация кода):")
+        # --- БЛОК 1: Основной ключ ---
+        lbl_main_key = QLabel("API Key (Для чата и генерации кода):")
         lbl_main_key.setStyleSheet("color: #d4d4d4; font-weight: bold;")
         creds_layout.addWidget(lbl_main_key)
         ui['key'] = self._create_input_field(is_password=True, placeholder=key_placeholder)
@@ -320,13 +417,20 @@ class APISettingsDialog(QDialog):
         else:
             ui['url'] = None
             
-        # --- БЛОК 2: Ключ для RAG (Опционально) ---
+        # --- БЛОК 2: Пул ключей RAG (Динамический) ---
         if has_embedding_key:
-            lbl_emb_key = QLabel("Embedding API Key (Для RAG / Индексации проекта):")
-            lbl_emb_key.setStyleSheet("color: #e6a822; font-weight: bold; margin-top: 5px;")
+            lbl_emb_key = QLabel("Пул ключей Embedding (Для RAG / Авто-ротации):")
+            lbl_emb_key.setStyleSheet("color: #e6a822; font-weight: bold; margin-top: 10px;")
             creds_layout.addWidget(lbl_emb_key)
-            ui['embedding_key'] = self._create_input_field(is_password=True, placeholder="Если пусто — используется основной ключ")
-            creds_layout.addWidget(ui['embedding_key'])
+            
+            ui['emb_keys_layout'] = QVBoxLayout()
+            ui['emb_keys_layout'].setSpacing(5)
+            creds_layout.addLayout(ui['emb_keys_layout'])
+            
+            btn_add_key = QPushButton("➕ Добавить резервный ключ")
+            btn_add_key.setStyleSheet("background-color: #333333; color: #d4d4d4; padding: 4px; border-radius: 3px; font-weight: bold;")
+            btn_add_key.clicked.connect(lambda _, l=ui['emb_keys_layout']: self._add_emb_key_row(l))
+            creds_layout.addWidget(btn_add_key)
             
         layout.addLayout(creds_layout)
         layout.addSpacing(5)
@@ -693,8 +797,8 @@ class APISettingsDialog(QDialog):
         if 'OpenAI' in self.tabs_ui:
             self.tabs_ui['OpenAI']['key'].setText(self.settings.value("openai_api_key", ""))
             self.tabs_ui['OpenAI']['url'].setText(self.settings.value("openai_base_url", "https://api.openai.com/v1"))
-            if 'embedding_key' in self.tabs_ui['OpenAI']:
-                self.tabs_ui['OpenAI']['embedding_key'].setText(self.settings.value("openai_embedding_key", ""))
+            if 'emb_keys_layout' in self.tabs_ui['OpenAI']:
+                self._load_emb_keys(self.tabs_ui['OpenAI']['emb_keys_layout'], self.settings.value("openai_embedding_key", "[]"))
         
         if 'Anthropic' in self.tabs_ui:
             self.tabs_ui['Anthropic']['key'].setText(self.settings.value("anthropic_api_key", ""))
@@ -702,8 +806,8 @@ class APISettingsDialog(QDialog):
             
         if 'Gemini' in self.tabs_ui:
             self.tabs_ui['Gemini']['key'].setText(self.settings.value("gemini_api_key", ""))
-            if 'embedding_key' in self.tabs_ui['Gemini']:
-                self.tabs_ui['Gemini']['embedding_key'].setText(self.settings.value("gemini_embedding_key", ""))
+            if 'emb_keys_layout' in self.tabs_ui['Gemini']:
+                self._load_emb_keys(self.tabs_ui['Gemini']['emb_keys_layout'], self.settings.value("gemini_embedding_key", "[]"))
 
         for p_id, ui in self.tabs_ui.items():
             states_json = self.settings.value(f"{p_id}_model_states", "{}")
@@ -735,9 +839,21 @@ class APISettingsDialog(QDialog):
             
             if not ui['is_custom']:
                 self.settings.setValue(f"{p_id.lower()}_api_key", key_val)
-                # Сохраняем Embedding ключ, если он есть
-                if 'embedding_key' in ui:
-                    self.settings.setValue(f"{p_id.lower()}_embedding_key", ui['embedding_key'].text().strip())
+                
+                # --- УМНОЕ СОХРАНЕНИЕ ПУЛА RAG КЛЮЧЕЙ В JSON ---
+                if 'emb_keys_layout' in ui:
+                    keys_list = []
+                    for i in range(ui['emb_keys_layout'].count()):
+                        row_w = ui['emb_keys_layout'].itemAt(i).widget()
+                        if row_w and hasattr(row_w, 'le_key'):
+                            k_val = row_w.le_key.text().strip()
+                            if k_val:
+                                keys_list.append({
+                                    "key": k_val,
+                                    "enabled": row_w.cb_enabled.isChecked(),
+                                    "comment": row_w.le_comment.text().strip()
+                                })
+                    self.settings.setValue(f"{p_id.lower()}_embedding_key", json.dumps(keys_list))
                     
                 if ui['url']:
                     default_url = "https://api.openai.com/v1" if p_id == "OpenAI" else "https://api.anthropic.com"

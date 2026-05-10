@@ -30,13 +30,15 @@ class CodeApplier:
         with open(self.mw.current_file_path, 'r', encoding='utf-8') as f:
             old_text = f.read()
             
+        # Сохраняем, только если текст действительно изменился
         if current_text.replace('\r\n', '\n') != old_text.replace('\r\n', '\n'):
             self.mw.file_manager.save_file(self.mw.current_file_path, current_text) 
             self.mw.log_system(f"Ручное сохранение: {os.path.basename(self.mw.current_file_path)}", color="#31a24c")
-            self.mw.show_popup("Сохранено", f"Файл сохранен.\nСоздан бэкап в Машине Времени.")
-            self.mw.update_git_status()
             
-            # --- ИСПРАВЛЕНИЕ: ЗАПУСК ФОНОВОГО RAG ПРИ СОХРАНЕНИИ ---
+            # ТИХОЕ УВЕДОМЛЕНИЕ вместо popup-окна (висит 3 секунды)
+            self.mw.status_bar.showMessage(f"💾 Файл успешно сохранен", 3000)
+            
+            self.mw.update_git_status()
             self.mw.trigger_silent_rag_update()
 
     def review_and_approve(self):
@@ -61,8 +63,6 @@ class CodeApplier:
                     
                 self.mw.log_system(f"Изменения от ИИ в {rel_path} сохранены!", color="#2e7d32")
                 self.mw.update_git_status()
-                
-                # --- ИСПРАВЛЕНИЕ: ЗАПУСК ФОНОВОГО RAG ПРИ УТВЕРЖДЕНИИ ---
                 self.mw.trigger_silent_rag_update()
                 
                 self.mw.proposed_updates.pop(0)
@@ -89,8 +89,6 @@ class CodeApplier:
                     self.mw.file_manager.save_file(self.mw.current_file_path, current_text)
                     self.mw.log_system(f"Ручные правки в {rel_path} утверждены и сохранены!", color="#2e7d32")
                     self.mw.update_git_status()
-                    
-                    # --- ИСПРАВЛЕНИЕ: ЗАПУСК ФОНОВОГО RAG ПРИ СОХРАНЕНИИ ИЗ DIFF-ОКНА ---
                     self.mw.trigger_silent_rag_update()
                 return
 

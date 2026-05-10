@@ -4,7 +4,7 @@ import base64
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QSplitter, 
                              QVBoxLayout, QDialog, QTabWidget, QTextBrowser, 
                              QLabel, QFileDialog, QPushButton, QMessageBox, QSizePolicy, QApplication)
-from PyQt6.QtCore import Qt, QDir, QUrl, QSettings, QEvent
+from PyQt6.QtCore import Qt, QDir, QUrl, QSettings, QEvent, QFileSystemWatcher
 from PyQt6.QtGui import QShortcut, QKeySequence
 
 # Импорты ядра
@@ -33,7 +33,7 @@ from core.bottom_panel import BottomPanelWidget
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("VibeCoder v1.24 — Pro IDE Edition")
+        self.setWindowTitle("VibeCoder v1.27 — Pro IDE Edition")
         
         self.settings = QSettings("VibeCoder", "Preferences")
         self.api_settings = QSettings("VibeCoder", "API_Config")
@@ -43,6 +43,10 @@ class MainWindow(QMainWindow):
         self.current_git_dialog = None
         
         self.opened_editors = {}
+        
+        # Защита от внешних изменений
+        self.file_watcher = QFileSystemWatcher(self)
+        self.file_watcher.fileChanged.connect(self.handle_external_file_change)
         
         self.setStyleSheet("""
             QToolTip { background-color: #252526; color: #d4d4d4; border: 1px solid #569cd6; border-radius: 4px; padding: 5px; font-size: 13px; }
@@ -220,44 +224,58 @@ class MainWindow(QMainWindow):
         self.editor_tabs.setMovable(True)
         self.editor_tabs.tabCloseRequested.connect(self.close_tab)
         
+        # --- Угловой виджет управления вкладками ---
         self.corner_widget = QWidget()
         self.corner_layout = QHBoxLayout(self.corner_widget)
         self.corner_layout.setContentsMargins(0, 0, 5, 0)
-        self.corner_layout.setSpacing(0)
+        self.corner_layout.setSpacing(2)
 
-        # ИСПРАВЛЕНИЕ: Буква "П" теперь белая и центрированная без лишних отступов
-        self.btn_tab_search = QPushButton("П")
-        self.btn_tab_search.setFixedSize(28, 28)
-        self.btn_tab_search.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_tab_search.setToolTip("Поиск по коду (Ctrl+F)")
+        self.btn_nav_back = QPushButton("◀")
+        self.btn_nav_forward = QPushButton("▶")
+        self.btn_tab_search = QPushButton("🔍")
         
-        self.btn_tab_search.setStyleSheet("""
+        btn_corner_style = """
             QPushButton { 
-                background-color: #0e639c; 
-                color: #ffffff; 
-                border: 1px solid #1177bb; 
+                background-color: #252526; 
+                color: #d4d4d4; 
+                border: 1px solid #3c3c3c; 
                 border-radius: 4px; 
-                font-size: 16px; 
+                font-size: 14px; 
                 font-weight: bold;
-                padding: 0px;
-                margin: 2px;
-                text-align: center;
+                width: 28px;
+                height: 28px;
             }
             QPushButton:hover { 
-                background-color: #1177bb; 
-                border-color: #38b056; 
+                background-color: #3c3c3c; 
+                border-color: #0e639c; 
             }
-        """)
+            QPushButton:pressed {
+                background-color: #0e639c;
+                color: white;
+            }
+        """
+        for btn in [self.btn_nav_back, self.btn_nav_forward, self.btn_tab_search]:
+            btn.setStyleSheet(btn_corner_style)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.corner_layout.addWidget(btn)
+
+        self.btn_nav_back.setToolTip("Отменить изменение (Undo)")
+        self.btn_nav_forward.setToolTip("Вернуть изменение (Redo)")
+        self.btn_tab_search.setToolTip("Поиск по коду (Ctrl+F)")
+
+        self.btn_nav_back.clicked.connect(self.nav_go_back)
+        self.btn_nav_forward.clicked.connect(self.nav_go_forward)
         self.btn_tab_search.clicked.connect(self.toggle_active_search)
         
-        self.corner_layout.addWidget(self.btn_tab_search)
         self.editor_tabs.setCornerWidget(self.corner_widget, Qt.Corner.TopRightCorner)
+
+        QShortcut(QKeySequence('Alt+Left'), self).activated.connect(self.nav_go_back)
+        QShortcut(QKeySequence('Alt+Right'), self).activated.connect(self.nav_go_forward)
         
         self.editor_splitter.addWidget(self.editor_tabs)
         
         self.terminal = TerminalWidget(self.project_path)
         self.terminal.setVisible(False) 
-       
         
         self.editor_splitter.addWidget(self.terminal)
         self.editor_splitter.setSizes([700, 300]) 
@@ -288,7 +306,7 @@ class MainWindow(QMainWindow):
         self.git_workflow = GitWorkflow(self)
         
         self.shortcut_save = QShortcut(QKeySequence("Ctrl+S"), self)
-        self.shortcut_save.activated.connect(self.code_applier.manual_save)
+        self.shortcut_save.activated.connect(self._manual_save_wrapper)
         
         self.shortcut_terminal = QShortcut(QKeySequence("Ctrl+`"), self)
         self.shortcut_terminal.activated.connect(self.btn_terminal.click)
@@ -304,14 +322,12 @@ class MainWindow(QMainWindow):
         self.btn_terminal.clicked.connect(self.toggle_terminal)
         self.btn_rag.clicked.connect(self.rag_controller.start_indexing)
         
-        # ИСПРАВЛЕНИЕ: Передаем аргумент 'pos' напрямую в метод, чтобы избежать TypeError
         self.btn_rag.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.btn_rag.customContextMenuRequested.connect(self.rag_controller.show_analytics)
 
         self.ai_controller = AIController(self)
         self.ai_controller.start()
         
-        # Подключаем сигнал терминала ЗДЕСЬ, когда "Мозги" уже созданы!
         self.terminal.ai_fix_requested.connect(self.ai_controller.handle_terminal_error)
         
         self.bottom_panel.update_mcp_status(
@@ -329,12 +345,10 @@ class MainWindow(QMainWindow):
 
     @property
     def editor(self):
-        """Возвращает текущий активный редактор во вкладках"""
         widget = self.editor_tabs.currentWidget()
         return widget if isinstance(widget, DarkPythonEditor) else None
 
     def toggle_active_search(self):
-        """Вызывает панель поиска в текущем активном редакторе"""
         if self.editor:
             self.editor.search_panel.toggle_panel()
 
@@ -359,7 +373,6 @@ class MainWindow(QMainWindow):
             self.status_bar.refresh_engine_list()
 
     def open_attachment_dialog(self):
-        from PyQt6.QtWidgets import QFileDialog
         files, _ = QFileDialog.getOpenFileNames(
             self, "Выберите картинки", self.project_path, "Images (*.png *.jpg *.jpeg *.webp *.gif *.bmp)"
         )
@@ -392,21 +405,56 @@ class MainWindow(QMainWindow):
     def trigger_silent_rag_update(self):
         self.rag_controller.trigger_silent_update()
 
+    # =========================================================
+    # ФИКС: ПЕРЕКЛЮЧЕНИЕ ПРОЕКТА С ПОЛНОЙ ИЗОЛЯЦИЕЙ КОНТЕКСТА
+    # =========================================================
     def handle_project_changed(self, new_path):
         self.project_path = new_path
         self.settings.setValue("last_project_path", new_path)
         
+        # Обновляем базовые менеджеры
         self.file_manager = FileManager(new_path)
         self.chat_logger = ChatLogger(new_path)
         self.git_manager = GitManager(new_path)
         self.prompt_input.project_path = new_path
         self.terminal.update_project_path(new_path)
+        
+        # --- ФИКС УТЕЧКИ КОНТЕКСТА ---
+        # 1. Обновляем путь в MCP менеджере
+        if hasattr(self.ai_controller, 'mcp_manager'):
+            self.ai_controller.mcp_manager.project_path = new_path
+
+        # 2. Пересоздаем RagController, чтобы он инициализировал VectorDatabase с новым путем
+        try:
+            self.btn_rag.customContextMenuRequested.disconnect()
+        except:
+            pass
+            
+        self.rag_controller = RagController(self)
         self.rag_controller.setup_watcher()
         
+        # Снова подключаем аналитику к новому контроллеру
+        self.btn_rag.customContextMenuRequested.connect(self.rag_controller.show_analytics)
+        # -----------------------------
+        
+        # Очистка старых вотчеров файлов
+        for p in self.file_watcher.files():
+            self.file_watcher.removePath(p)
+            
         self.opened_editors.clear()
         self.editor_tabs.clear()
         self.current_file_path = None
-        self.editor_tabs.addTab(DarkPythonEditor(), "Ничего не открыто")
+        
+        # Восстановление вкладок для нового проекта
+        project_hash = os.path.basename(new_path)
+        saved_tabs = self.settings.value(f"session_tabs_{project_hash}", [])
+        
+        if not saved_tabs:
+            self.editor_tabs.addTab(DarkPythonEditor(), "Ничего не открыто")
+        else:
+            for path in saved_tabs:
+                if isinstance(path, str) and os.path.exists(path):
+                    self.open_file(path)
         
         self.memory_old_code = None
         self.proposed_updates = []
@@ -515,6 +563,11 @@ class MainWindow(QMainWindow):
             
             self.opened_editors[path] = new_editor
             self.current_file_path = path
+            
+            new_editor.textChanged.connect(lambda p=path: self.mark_tab_dirty(p))
+            
+            if path not in self.file_watcher.files():
+                self.file_watcher.addPath(path)
 
     def open_time_machine(self, file_path):
         dialog = TimeMachineDialog(self, file_path, self.file_manager)
@@ -648,12 +701,12 @@ class MainWindow(QMainWindow):
         scrollbar = self.chat_history.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
-    
-        
     def close_tab(self, index):
         widget = self.editor_tabs.widget(index)
         path_to_remove = next((p for p, ed in self.opened_editors.items() if ed == widget), None)
         if path_to_remove:
+            if path_to_remove in self.file_watcher.files():
+                self.file_watcher.removePath(path_to_remove)
             del self.opened_editors[path_to_remove]
         self.editor_tabs.removeTab(index)
         
@@ -665,3 +718,62 @@ class MainWindow(QMainWindow):
         if path in self.opened_editors:
             index = self.editor_tabs.indexOf(self.opened_editors[path])
             self.close_tab(index)
+
+    def mark_tab_dirty(self, path):
+        if path in self.opened_editors:
+            index = self.editor_tabs.indexOf(self.opened_editors[path])
+            current_text = self.editor_tabs.tabText(index)
+            if not current_text.startswith('*'):
+                self.editor_tabs.setTabText(index, '*' + current_text)
+
+    def _manual_save_wrapper(self):
+        self.code_applier.manual_save()
+        if self.current_file_path and self.current_file_path in self.opened_editors:
+            index = self.editor_tabs.indexOf(self.opened_editors[self.current_file_path])
+            text = self.editor_tabs.tabText(index)
+            if text.startswith('*'):
+                self.editor_tabs.setTabText(index, text[1:])
+
+    def nav_go_back(self):
+        if self.editor:
+            self.editor.undo()
+
+    def nav_go_forward(self):
+        if self.editor:
+            self.editor.redo()
+
+    def handle_external_file_change(self, path):
+        if path in self.opened_editors:
+            editor = self.opened_editors[path]
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    disk_content = f.read()
+                if editor.text() == disk_content:
+                    return
+            except Exception:
+                pass
+
+            msg = QMessageBox(self)
+            msg.setWindowTitle('⚠️ Файл изменен извне')
+            msg.setText(f'Файл <b>{os.path.basename(path)}</b> был изменен другой программой.<br><br>Перезагрузить его?')
+            msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            msg.setStyleSheet("""
+                QMessageBox { background-color: #252526; color: #d4d4d4; } 
+                QLabel { color: #d4d4d4; font-size: 13px; } 
+                QPushButton { background-color: #0e639c; color: white; padding: 6px 20px; border-radius: 4px; font-weight: bold; } 
+                QPushButton:hover { background-color: #1177bb; }
+            """)
+            
+            if msg.exec() == QMessageBox.StandardButton.Yes:
+                editor.setText(disk_content)
+                index = self.editor_tabs.indexOf(editor)
+                text = self.editor_tabs.tabText(index)
+                if text.startswith('*'):
+                    self.editor_tabs.setTabText(index, text[1:])
+
+    def closeEvent(self, event):
+        if self.project_path:
+            project_hash = os.path.basename(self.project_path)
+            opened_paths = list(self.opened_editors.keys())
+            self.settings.setValue(f"session_tabs_{project_hash}", opened_paths)
+        super().closeEvent(event)

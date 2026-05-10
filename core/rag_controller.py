@@ -7,9 +7,8 @@ from core.indexer_worker import IndexerWorker
 from core.rag_dialog import RAGAnalyticsDialog
 from core.embeddings import EmbeddingFactory
 
-# --- ИСПРАВЛЕНИЕ: Фоновый поток для поллинга файлов, чтобы не тормозил UI ---
 class ScannerThread(QThread):
-    scan_finished = pyqtSignal(dict, bool)  # Возвращает (словарь_mtimes, есть_ли_изменения)
+    scan_finished = pyqtSignal(dict, bool)
 
     def __init__(self, project_path, allowed_extensions, last_mtimes):
         super().__init__()
@@ -22,7 +21,6 @@ class ScannerThread(QThread):
         current_mtimes = {}
         
         for root, dirs, files in os.walk(self.project_path):
-            # Игнорируем тяжелые системные папки, чтобы не грузить диск
             dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ('venv', '__pycache__', 'node_modules')]
             for f in files:
                 ext = os.path.splitext(f)[1].lower()
@@ -47,7 +45,6 @@ class RagController:
         self.last_mtimes = {} 
         
         self.poll_timer = QTimer()
-        # ИСПРАВЛЕНИЕ: Запускаем скан асинхронно
         self.poll_timer.timeout.connect(self._start_background_scan)
 
         self.debounce_timer = QTimer()
@@ -62,9 +59,6 @@ class RagController:
         
         self.scanner_thread = None
 
-    # ==========================================
-    # ИЗВЛЕЧЕНИЕ КОНТЕКСТА (Перенесено из AIController)
-    # ==========================================
     def get_context_for_prompt(self, user_text):
         if not user_text or len(user_text.strip()) < 10:
             return ""
@@ -104,15 +98,11 @@ class RagController:
             self.mw.log_system(f"⚠️ Ошибка RAG-поиска: {str(e)}", color="#ffaa00")
             return ""
 
-    # ==========================================
-    # СИСТЕМА ФОНОВОГО ОТСЛЕЖИВАНИЯ
-    # ==========================================
     def setup_watcher(self):
         self.poll_timer.stop()
         self.debounce_timer.stop()
         self.last_mtimes.clear()
         
-        # Первичный сбор хешей (оставляем в Main Thread для надежности старта)
         for root, dirs, files in os.walk(self.mw.project_path):
             dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ('venv', '__pycache__', 'node_modules')]
             for f in files:
@@ -126,9 +116,7 @@ class RagController:
                         
         self.poll_timer.start(3000)
 
-    # ИСПРАВЛЕНИЕ: Безопасный запуск потока
     def _start_background_scan(self):
-        # Пропускаем такт, если старый скан еще не завершился (защита от наслоения потоков)
         if self.scanner_thread and self.scanner_thread.isRunning():
             return
             
@@ -141,9 +129,6 @@ class RagController:
             self.last_mtimes = current_mtimes
             self.debounce_timer.start()
 
-    # ==========================================
-    # УПРАВЛЕНИЕ ИНДЕКСАЦИЕЙ
-    # ==========================================
     def show_analytics(self):
         db = VectorDatabase(self.mw.project_path)
         dlg = RAGAnalyticsDialog(self.mw, vector_db=db, settings=self.mw.settings)
@@ -168,6 +153,8 @@ class RagController:
             self.indexer_worker.progress_signal.connect(self._on_indexer_progress)
             self.indexer_worker.finished_signal.connect(self._on_indexer_finished)
             self.indexer_worker.error_signal.connect(self._on_indexer_error)
+            # 🚨 ИСПРАВЛЕНИЕ: ПОДКЛЮЧЕН КАНАЛ ЛОГОВ К ЧАТУ
+            self.indexer_worker.log_signal.connect(lambda msg, color: self.mw.log_system(msg, color=color))
             self.indexer_worker.start()
 
     def trigger_silent_update(self):
@@ -179,6 +166,8 @@ class RagController:
         
         self.indexer_worker = IndexerWorker(self.mw.project_path, self.mw.file_manager, silent=True)
         self.indexer_worker.finished_signal.connect(self._on_silent_rag_finished)
+        # 🚨 ИСПРАВЛЕНИЕ: ПОДКЛЮЧЕН КАНАЛ ЛОГОВ К ЧАТУ
+        self.indexer_worker.log_signal.connect(lambda msg, color: self.mw.log_system(msg, color=color))
         self.indexer_worker.start()
 
     def _on_silent_rag_finished(self):

@@ -5,6 +5,7 @@ import urllib.request
 import urllib.parse
 import re
 import subprocess
+import collections
 
 class ExternalMCPClient:
     """
@@ -12,7 +13,6 @@ class ExternalMCPClient:
     Общается с внешними серверами (Node.js/Python) через stdio по спецификации JSON-RPC 2.0.
     """
     def __init__(self, command, env=None):
-        # shell=True нужен для Windows, чтобы корректно работала команда npx
         self.process = subprocess.Popen(
             command,
             shell=True,
@@ -25,7 +25,6 @@ class ExternalMCPClient:
         )
         self.req_id = 1
         
-        # --- Обязательный хэндшейк по стандарту MCP ---
         self.send_request("initialize", {
             "protocolVersion": "2024-11-05",
             "capabilities": {},
@@ -51,7 +50,7 @@ class ExternalMCPClient:
                     self.req_id += 1
                     return resp
             except json.JSONDecodeError:
-                continue # Пропускаем обычные текстовые логи сервера
+                continue
 
     def send_notification(self, method, params=None):
         req = {"jsonrpc": "2.0", "method": method}
@@ -70,13 +69,13 @@ class ExternalMCPClient:
         })
         return resp.get("result", {})
 
+
 class MCPManager:
     def __init__(self, project_path):
         self.project_path = project_path
         self.external_client = None
         self.external_tools = []
         
-        # --- НОВОЕ: Переменные для Светофора (Индикатора здоровья) ---
         self.status = "offline" 
         self.error_message = "MCP не инициализирован"
         
@@ -85,7 +84,6 @@ class MCPManager:
         
         self._init_external_servers()
 
-        # Наши встроенные (Internal) инструменты
         self.internal_tools = [
             {
                 "type": "function",
@@ -118,7 +116,7 @@ class MCPManager:
                 "type": "function",
                 "function": {
                     "name": "run_terminal_command",
-                    "description": "Выполняет команду в системном терминале (например: pip install, git status, pytest). Работает в безопасном режиме (песочница).",
+                    "description": "Выполняет команду в системном терминале (например: pip install, git status). Работает в безопасном режиме (песочница).",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -127,23 +125,35 @@ class MCPManager:
                         "required": ["command"]
                     }
                 }
+            },
+            # --- НОВЫЙ ИНСТРУМЕНТ ФАЗЫ 34 ---
+            {
+                "type": "function",
+                "function": {
+                    "name": "analyze_log",
+                    "description": "Интеллектуальный парсер текстовых файлов и логов. Читает гигантские файлы, не забивая оперативную память. Используй его для поиска ошибок (Traceback, Exception) в логах.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "file_path": {"type": "string", "description": "Относительный путь к файлу логов."},
+                            "keyword": {"type": "string", "description": "Слово для поиска (например, 'ERROR'). Если пусто, вернутся просто последние строки файла."},
+                            "tail_lines": {"type": "integer", "description": "Сколько последних строк вернуть, если keyword пуст (по умолчанию 50)."},
+                            "context_lines": {"type": "integer", "description": "Сколько строк захватить до и после найденного слова (по умолчанию 5)."}
+                        },
+                        "required": ["file_path"]
+                    }
+                }
             }
         ]
 
     def _init_external_servers(self):
-        """Поднимает внешний сервер Context7 и выкачивает его инструменты"""
         if self.context7_api_key and self.context7_api_key != "ТВОЙ_КЛЮЧ_CONTEXT7":
             try:
                 env = os.environ.copy()
                 env["CONTEXT7_API_KEY"] = self.context7_api_key
-                
-                # Запускаем официальный пакет Upstash через Node.js
                 self.external_client = ExternalMCPClient("npx -y @upstash/context7-mcp", env=env)
-                
-                # Запрашиваем схему инструментов у запущенного сервера
                 c7_tools = self.external_client.get_tools()
                 
-                # Конвертируем MCP формат в формат OpenAI, который понимает наша нейросеть
                 for tool in c7_tools:
                     self.external_tools.append({
                         "type": "function",
@@ -153,13 +163,9 @@ class MCPManager:
                             "parameters": tool.get("inputSchema", {})
                         }
                     })
-                    
-                # --- НОВОЕ: Успешный статус ---
                 self.status = "online"
                 self.error_message = f"Context7 подключен (Доступно инструментов: {len(c7_tools)})"
-                
             except Exception as e:
-                # --- НОВОЕ: Статус ошибки ---
                 self.status = "error"
                 self.error_message = f"Ошибка Context7: {str(e)}"
                 print(f"⚠️ {self.error_message}")
@@ -168,25 +174,20 @@ class MCPManager:
             self.error_message = "Ключ Context7 не задан. Внешние инструменты отключены."
 
     def get_tools_schema(self):
-        """Возвращает объединенный список: локальные + скачанные с Context7"""
         return self.internal_tools + self.external_tools
 
     def execute_tool(self, tool_name, kwargs):
-        """Маршрутизатор: сам решает, кто должен выполнить команду"""
         try:
-            # Сначала проверяем наши локальные инструменты
             if tool_name == "web_search":
                 return self._tool_web_search(**kwargs)
             elif tool_name == "execute_sql":
                 return self._tool_execute_sql(**kwargs)
             elif tool_name == "run_terminal_command":
                 return self._tool_run_terminal_command(**kwargs)
-                
-            # Если это не наш инструмент, перенаправляем команду во внешний MCP сервер
+            elif tool_name == "analyze_log":
+                return self._tool_analyze_log(**kwargs)
             elif self.external_client:
                 result = self.external_client.call_tool(tool_name, kwargs)
-                
-                # MCP возвращает ответ в виде массива content
                 content_blocks = result.get("content", [])
                 if content_blocks and content_blocks[0].get("type") == "text":
                     return content_blocks[0].get("text")
@@ -200,9 +201,73 @@ class MCPManager:
     # РЕАЛИЗАЦИЯ ЛОКАЛЬНЫХ ИНСТРУМЕНТОВ
     # ==========================================
 
+    def _tool_analyze_log(self, file_path, keyword=None, tail_lines=50, context_lines=5):
+        """Интеллектуальный ленивый парсер логов (Фаза 34)"""
+        abs_path = os.path.abspath(os.path.join(self.project_path, file_path))
+        project_abs = os.path.abspath(self.project_path)
+        
+        # Защита от выхода за пределы проекта
+        if not os.path.commonpath([project_abs]) == os.path.commonpath([project_abs, abs_path]):
+            return "❌ Ошибка: доступ к файлам вне директории проекта запрещен."
+            
+        if not os.path.exists(abs_path):
+            return f"❌ Ошибка: Файл '{file_path}' не найден."
+
+        try:
+            file_size_mb = os.path.getsize(abs_path) / (1024 * 1024)
+            
+            # Если ключевое слово не задано, отдаем просто "хвост" файла
+            if not keyword:
+                with open(abs_path, 'r', encoding='utf-8', errors='replace') as f:
+                    tail = collections.deque(f, maxlen=tail_lines)
+                return f"📄 Последние {len(tail)} строк файла {file_path} ({file_size_mb:.1f} MB):\n\n" + "".join(tail)
+
+            # Если задан поиск с контекстом
+            results = []
+            with open(abs_path, 'r', encoding='utf-8', errors='replace') as f:
+                before_buffer = collections.deque(maxlen=context_lines)
+                lines_after_match = 0
+                current_match_block = []
+                
+                for line_num, line in enumerate(f, 1):
+                    # Если мы находимся в режиме записи строк ПОСЛЕ совпадения
+                    if lines_after_match > 0:
+                        current_match_block.append(f"{line_num}: {line.rstrip()}")
+                        lines_after_match -= 1
+                        
+                        # Блок завершен
+                        if lines_after_match == 0:
+                            results.append("\n".join(current_match_block))
+                            current_match_block = []
+                            # Ограничиваем выдачу 5 совпадениями, чтобы не сжечь токены ИИ
+                            if len(results) >= 5:
+                                results.append("\n... [ПОКАЗАНЫ ПЕРВЫЕ 5 СОВПАДЕНИЙ, ОСТАЛЬНЫЕ ОБРЕЗАНЫ ДЛЯ ЭКОНОМИИ КОНТЕКСТА]")
+                                break
+                        continue
+                        
+                    # Если нашли совпадение
+                    if keyword.lower() in line.lower():
+                        current_match_block.append(f"--- Найден блок (строка {line_num}) ---")
+                        for b_line_num, b_line in before_buffer:
+                            current_match_block.append(f"{b_line_num}: {b_line.rstrip()}")
+                        current_match_block.append(f">>{line_num}: {line.rstrip()}<<")
+                        lines_after_match = context_lines
+                    else:
+                        before_buffer.append((line_num, line))
+                        
+                # На случай, если файл закончился до того, как блок контекста 'после' заполнился
+                if current_match_block:
+                     results.append("\n".join(current_match_block))
+                     
+            if not results:
+                return f"Поиск завершен. Ключевое слово '{keyword}' не найдено в файле {file_path}."
+                
+            return f"🔍 Найдено '{keyword}' в {file_path}:\n\n" + "\n\n".join(results)
+            
+        except Exception as e:
+            return f"❌ Системная ошибка при чтении лога: {str(e)}"
+
     def _tool_run_terminal_command(self, command):
-        """Безопасная песочница для выполнения терминальных команд"""
-        # 1. Жесткий Blacklist опасных команд
         forbidden_keywords = [
             'rm ', 'del ', 'format ', 'shutdown', 'reboot', 'mkfs', 
             '>', '>>', 'chmod', 'chown', 'kill', 'taskkill', 'curl ', 'wget '
@@ -213,16 +278,14 @@ class MCPManager:
             if word in cmd_lower:
                 return f"⛔ КОМАНДА ЗАБЛОКИРОВАНА (Сработала защита Песочницы): Использование конструкции '{word}' запрещено в целях безопасности."
 
-        # 2. Выполнение с Таймаутом
         try:
-            # Запускаем строго в папке проекта
             result = subprocess.run(
                 command,
                 shell=True,
                 cwd=self.project_path,
                 capture_output=True,
                 text=True,
-                timeout=15  # Максимум 15 секунд на команду
+                timeout=15 
             )
             
             output = result.stdout.strip()
