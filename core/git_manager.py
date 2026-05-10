@@ -54,7 +54,6 @@ class GitManager:
         success, output = self.run_git('status', '--porcelain')
         return len(output.split('\n')) if success and output else (0 if success else -1)
 
-    # --- ИСПРАВЛЕННЫЙ МЕТОД ---
     def get_changed_files(self):
         if not self.is_repo(): return []
         success, output = self.run_git('status', '--porcelain')
@@ -62,20 +61,17 @@ class GitManager:
         
         files = []
         for line in output.splitlines():
-            line = line.strip() # Очищаем каждую строку от лишних пробелов по краям
+            line = line.strip() 
             if not line: continue
             
-            # Умное разбиение: строго на 2 части (Статус и Путь), игнорируя лишние пробелы
             parts = line.split(maxsplit=1)
             if len(parts) < 2: continue
             
             file_path = parts[1].strip()
             
-            # Снимаем кавычки, если Git экранировал русские буквы
             if file_path.startswith('"') and file_path.endswith('"'):
                 file_path = file_path[1:-1]
                 
-            # Если файл был переименован (R old -> new)
             if ' -> ' in file_path:
                 file_path = file_path.split(' -> ')[-1].strip()
                 if file_path.startswith('"') and file_path.endswith('"'):
@@ -95,7 +91,6 @@ class GitManager:
         diff_files = []
         for f in files:
             abs_path = os.path.join(self.project_path, f)
-            # Добавляем в предпросмотр только если файл реально существует
             if os.path.exists(abs_path):
                 self.run_git('add', '-N', '--force', '--', f)
             diff_files.append(f)
@@ -109,11 +104,9 @@ class GitManager:
         for f in files:
             abs_path = os.path.join(self.project_path, f)
             if os.path.exists(abs_path):
-                # Если файл есть - добавляем
                 add_success, add_err = self.run_git('add', '--force', '--', f)
                 if not add_success: return False, f"Ошибка добавления файла {f}: {add_err}"
             else:
-                # Если файла нет (удален) - безопасно вычищаем его из памяти Git
                 self.run_git('rm', '--cached', '--ignore-unmatch', '--', f)
                 
         commit_success, commit_err = self.run_git('commit', '-m', message)
@@ -125,13 +118,22 @@ class GitManager:
     # ==========================================
 
     def get_file_history(self, file_path):
-        success, output = self.run_git('log', '--pretty=format:%h|%ad|%s', '--date=short', '--', file_path)
+        # ИСПРАВЛЕНИЕ: Вытягиваем %B (полное тело коммита). 
+        # Используем кастомные разделители, чтобы не сломать парсинг многострочных текстов.
+        success, output = self.run_git('log', '--pretty=format:%h|VIBE|%ad|VIBE|%B|VIBE_END|', '--date=short', '--', file_path)
         if not success or not output: return []
+        
         history = []
-        for line in output.split('\n'):
-            parts = line.split('|', 2)
+        commits = output.split('|VIBE_END|')
+        for commit_str in commits:
+            if not commit_str.strip(): continue
+            parts = commit_str.strip().split('|VIBE|', 2)
             if len(parts) == 3:
-                history.append({'hash': parts[0], 'date': parts[1], 'message': parts[2]})
+                history.append({
+                    'hash': parts[0].strip(),
+                    'date': parts[1].strip(),
+                    'message': parts[2].strip()
+                })
         return history
 
     def get_file_content_at_commit(self, file_path, commit_hash):

@@ -186,7 +186,6 @@ class DarkPythonEditor(QsciScintilla):
         self.setUnmatchedBraceBackgroundColor(QColor("#252526"))
         self.setUnmatchedBraceForegroundColor(QColor("#ff4444"))
         
-        # ВОССТАНОВЛЕННЫЙ БЛОК ПОДСВЕТКИ КОДА (70 СТРОК)
         self.lexer = QsciLexerPython(self)
         self.lexer.setDefaultFont(font)
         self.lexer.setDefaultPaper(QColor("#1e1e1e"))
@@ -205,7 +204,6 @@ class DarkPythonEditor(QsciScintilla):
         
         self.setLexer(self.lexer)
         
-        # Настройки автодополнения
         self.setAutoCompletionSource(QsciScintilla.AutoCompletionSource.AcsDocument)
         self.setAutoCompletionThreshold(2)
         self.setAutoCompletionCaseSensitivity(False)
@@ -216,6 +214,7 @@ class DarkPythonEditor(QsciScintilla):
         self.btn_jump.setFixedSize(65, 26)
         self.btn_jump.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_jump.setToolTip("Перейти в конец/начало кода")
+        self.btn_jump.setFocusPolicy(Qt.FocusPolicy.NoFocus) 
         self.btn_jump.setStyleSheet("""
             QPushButton {
                 background-color: rgba(30, 30, 30, 180);
@@ -232,27 +231,42 @@ class DarkPythonEditor(QsciScintilla):
             }
         """)
         self.btn_jump.clicked.connect(self.toggle_jump)
+        
         self.cursorPositionChanged.connect(self._update_jump_button)
+        self.verticalScrollBar().valueChanged.connect(self._update_jump_button)
 
         self.search_panel = SearchPanel(self)
 
-    def toggle_jump(self):
-        current_line, _ = self.getCursorPosition()
-        last_line = self.lines() - 1
-
-        if current_line >= last_line - 2:
-            self.setCursorPosition(0, 0)
-            self.ensureLineVisible(0)
+    def _is_at_bottom(self):
+        """Универсальная проверка: находимся ли мы внизу документа"""
+        vsb = self.verticalScrollBar()
+        if vsb.maximum() > 0:
+            return vsb.value() >= vsb.maximum() - 2
         else:
-            last_index = len(self.text(last_line))
-            self.setCursorPosition(last_line, last_index)
-            self.ensureLineVisible(last_line)
+            current_line = self.getCursorPosition()[0]
+            last_line = max(0, self.lines() - 1)
+            return current_line >= (last_line / 2)
+
+    def toggle_jump(self):
+        """100% бронебойный прыжок с принудительной прокруткой ползунка"""
+        if self._is_at_bottom():
+            # Прыжок наверх
+            self.SendScintilla(2316) # Нативный прыжок курсора (SCI_DOCUMENTSTART)
+            self.verticalScrollBar().setValue(0) # Принудительно крутим ползунок
+            self.setCursorPosition(0, 0)
+        else:
+            # Прыжок вниз
+            self.SendScintilla(2318) # Нативный прыжок курсора (SCI_DOCUMENTEND)
+            self.verticalScrollBar().setValue(self.verticalScrollBar().maximum()) # Принудительно крутим ползунок
+            last_line = max(0, self.lines() - 1)
+            self.setCursorPosition(last_line, len(self.text(last_line)))
+            
         self.setFocus()
 
-    def _update_jump_button(self, line, index):
+    def _update_jump_button(self, *args):
         if not hasattr(self, 'btn_jump'): return
-        last_line = self.lines() - 1
-        if line >= last_line - 2:
+        
+        if self._is_at_bottom():
             if self.btn_jump.text() != "⬆ TOP":
                 self.btn_jump.setText("⬆ TOP")
         else:

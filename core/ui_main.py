@@ -233,6 +233,7 @@ class MainWindow(QMainWindow):
         self.btn_nav_back = QPushButton("◀")
         self.btn_nav_forward = QPushButton("▶")
         self.btn_tab_search = QPushButton("🔍")
+        self.btn_tab_save = QPushButton("💾") # НОВАЯ КНОПКА СОХРАНЕНИЯ
         
         btn_corner_style = """
             QPushButton { 
@@ -254,7 +255,7 @@ class MainWindow(QMainWindow):
                 color: white;
             }
         """
-        for btn in [self.btn_nav_back, self.btn_nav_forward, self.btn_tab_search]:
+        for btn in [self.btn_nav_back, self.btn_nav_forward, self.btn_tab_search, self.btn_tab_save]:
             btn.setStyleSheet(btn_corner_style)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             self.corner_layout.addWidget(btn)
@@ -262,10 +263,12 @@ class MainWindow(QMainWindow):
         self.btn_nav_back.setToolTip("Отменить изменение (Undo)")
         self.btn_nav_forward.setToolTip("Вернуть изменение (Redo)")
         self.btn_tab_search.setToolTip("Поиск по коду (Ctrl+F)")
+        self.btn_tab_save.setToolTip("Сохранить файл (Ctrl+S)") # ПОДСКАЗКА ДЛЯ КНОПКИ
 
         self.btn_nav_back.clicked.connect(self.nav_go_back)
         self.btn_nav_forward.clicked.connect(self.nav_go_forward)
         self.btn_tab_search.clicked.connect(self.toggle_active_search)
+        self.btn_tab_save.clicked.connect(self._manual_save_wrapper) # ПРИВЯЗКА К ФУНКЦИИ
         
         self.editor_tabs.setCornerWidget(self.corner_widget, Qt.Corner.TopRightCorner)
 

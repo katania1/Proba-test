@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
                              QTextEdit, QLabel, QMessageBox, QLineEdit, QFrame,
                              QTreeWidget, QTreeWidgetItem, QWidget, QCheckBox,
                              QMenu, QSplitter, QTextBrowser, QListWidget, QListWidgetItem, QTabWidget)
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QSettings
 
 # ==========================================
 # МАШИНА ВРЕМЕНИ ДЛЯ GIT (С ПОДСВЕТКОЙ И ВКЛАДКАМИ)
@@ -13,8 +13,8 @@ class GitHistoryDialog(QDialog):
         super().__init__(parent)
         self.git_manager = git_manager
         self.file_path = file_path
+        self.settings = QSettings("VibeCoder", "Preferences") # Инициализация настроек памяти
         self.setWindowTitle(f"🕒 Git-История: {os.path.basename(file_path)}")
-        self.resize(850, 600) # Окно чуть шире для комфортного чтения кода
         self.setStyleSheet("background-color: #1e1e1e; color: #d4d4d4;")
         self.init_ui()
         self.load_history()
@@ -25,14 +25,23 @@ class GitHistoryDialog(QDialog):
         lbl.setStyleSheet("font-weight: bold; color: #569cd6; font-size: 14px;")
         layout.addWidget(lbl)
         
-        splitter = QSplitter(Qt.Orientation.Horizontal) # Слева коммиты, справа код
+        self.main_splitter = QSplitter(Qt.Orientation.Horizontal) # Главный сплиттер (Лево/Право)
         
         self.history_list = QListWidget()
-        self.history_list.setStyleSheet("background-color: #252526; border: 1px solid #3c3c3c; font-size: 13px; padding: 5px;")
+        self.history_list.setStyleSheet("background-color: #252526; border: 1px solid #3c3c3c; font-size: 13px; padding: 5px; outline: none;")
         self.history_list.itemSelectionChanged.connect(self.on_commit_selected)
-        splitter.addWidget(self.history_list)
+        self.main_splitter.addWidget(self.history_list)
         
-        # --- НОВОЕ: ВКЛАДКИ ДЛЯ КОДА ---
+        # --- НОВОЕ: ВЕРТИКАЛЬНЫЙ СПЛИТТЕР ДЛЯ ПРАВОЙ ЧАСТИ ---
+        self.right_splitter = QSplitter(Qt.Orientation.Vertical)
+        
+        # Верхняя часть: Текст коммита
+        self.commit_details = QTextBrowser()
+        self.commit_details.setStyleSheet("background-color: #252526; border: 1px solid #3c3c3c; border-radius: 4px; padding: 10px; font-size: 13px;")
+        self.commit_details.setHtml("<span style='color: #888888;'>Выберите коммит слева, чтобы увидеть подробности...</span>")
+        self.right_splitter.addWidget(self.commit_details)
+        
+        # Нижняя часть: Вкладки кода
         self.tabs = QTabWidget()
         self.tabs.setStyleSheet("""
             QTabWidget::pane { border: 1px solid #3c3c3c; }
@@ -50,11 +59,15 @@ class GitHistoryDialog(QDialog):
         self.tabs.addTab(self.diff_viewer, "📝 Изменения (Diff)")
         self.tabs.addTab(self.raw_viewer, "📄 Весь файл (Raw)")
         
-        splitter.addWidget(self.tabs)
-        # --------------------------------
+        self.right_splitter.addWidget(self.tabs)
         
-        splitter.setSizes([250, 600]) # Пропорции сплиттера
-        layout.addWidget(splitter, 1)
+        # Задаем базовые пропорции правой части (20% на текст, 80% на код)
+        self.right_splitter.setSizes([150, 600])
+        
+        self.main_splitter.addWidget(self.right_splitter)
+        # ----------------------------------------------------
+        
+        layout.addWidget(self.main_splitter, 1)
         
         btn_layout = QHBoxLayout()
         self.btn_restore = QPushButton("🎯 Восстановить эту версию")
@@ -66,11 +79,34 @@ class GitHistoryDialog(QDialog):
         btn_layout.addWidget(self.btn_restore)
         layout.addLayout(btn_layout)
 
+        # --- ВОССТАНОВЛЕНИЕ ГЕОМЕТРИИ (ПАМЯТЬ ОКНА) ---
+        geom = self.settings.value("git_history_geometry")
+        if geom:
+            self.restoreGeometry(geom)
+        else:
+            self.resize(1100, 750) # Увеличенный дефолтный размер окна
+            
+        main_sizes = self.settings.value("git_history_main_splitter")
+        if main_sizes: 
+            self.main_splitter.restoreState(main_sizes)
+        else: 
+            self.main_splitter.setSizes([300, 800])
+            
+        right_sizes = self.settings.value("git_history_right_splitter")
+        if right_sizes: 
+            self.right_splitter.restoreState(right_sizes)
+
+    def closeEvent(self, event):
+        # Сохраняем размеры окна и сплиттеров при закрытии
+        self.settings.setValue("git_history_geometry", self.saveGeometry())
+        self.settings.setValue("git_history_main_splitter", self.main_splitter.saveState())
+        self.settings.setValue("git_history_right_splitter", self.right_splitter.saveState())
+        super().closeEvent(event)
+
     def format_diff_to_html(self, diff_text):
         """Превращает сырой текст патча в красивый HTML с подсветкой"""
         html = "<div style='font-family: Consolas, monospace; font-size: 13px; white-space: pre-wrap; line-height: 1.4;'>"
         for line in diff_text.split('\n'):
-            # Экранируем HTML-теги внутри кода
             escaped = line.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
             
             if escaped.startswith('+') and not escaped.startswith('+++'):
@@ -95,25 +131,41 @@ class GitHistoryDialog(QDialog):
             return
             
         for entry in history:
-            # ИСПРАВЛЕНИЕ 2: Оставляем в списке только первую строку коммита для аккуратности
             short_msg = entry['message'].split('\n')[0]
             item = QListWidgetItem(f"[{entry['date']}] {short_msg}")
-            item.setData(Qt.ItemDataRole.UserRole, entry['hash'])
             
-            # Добавляем всплывающую подсказку (ToolTip) с полным текстом коммита
-            item.setToolTip(f"Коммит: {entry['hash']}\nДата: {entry['date']}\n\n{entry['message']}")
+            # Сохраняем Хэш
+            item.setData(Qt.ItemDataRole.UserRole, entry['hash'])
+            # Сохраняем ПОЛНЫЙ текст коммита в соседнюю ячейку памяти элемента
+            item.setData(Qt.ItemDataRole.UserRole + 1, entry['message'])
             
             self.history_list.addItem(item)
             
     def on_commit_selected(self):
         items = self.history_list.selectedItems()
         if not items: return
+        
         commit_hash = items[0].data(Qt.ItemDataRole.UserRole)
+        full_message = items[0].data(Qt.ItemDataRole.UserRole + 1)
+        
         if not commit_hash: return
         
         self.btn_restore.setEnabled(True)
         self.diff_viewer.setText("⏳ Загрузка...")
         self.raw_viewer.setText("⏳ Загрузка...")
+        
+        # --- РЕНДЕР ПОЛНОГО ТЕКСТА КОММИТА В ПАНЕЛЬ ---
+        lines = full_message.split('\n')
+        title = lines[0]
+        body = '\n'.join(lines[1:]).strip()
+        
+        html_msg = f"<div style='font-family: sans-serif;'>"
+        html_msg += f"<b style='color: #569cd6; font-size: 15px;'>{title}</b><br><br>"
+        if body:
+            html_msg += f"<span style='white-space: pre-wrap; font-size: 13px; line-height: 1.5; color: #d4d4d4;'>{body}</span>"
+        html_msg += "</div>"
+        
+        self.commit_details.setHtml(html_msg)
         
         # 1. Загружаем полный файл (Raw)
         code = self.git_manager.get_file_content_at_commit(self.file_path, commit_hash)
@@ -217,7 +269,6 @@ class GitDialog(QDialog):
         layout.addLayout(sel_layout)
 
         self.text_input = QTextEdit()
-        # ИСПРАВЛЕНИЕ 1: Явно добавлено color: #d4d4d4; для видимости текста
         self.text_input.setStyleSheet("background-color: #252526; color: #d4d4d4; border: 1px solid #3c3c3c; font-size: 14px; padding: 10px;")
         self.text_input.setPlaceholderText("Напишите текст коммита (или нажмите '✨ Сгенерировать ИИ-описание')...")
         self.text_input.setMaximumHeight(80) 
@@ -318,7 +369,6 @@ class GitDialog(QDialog):
             self.file_tree.blockSignals(False)
             return
             
-        # Убрали опасный strip, который съедал первую букву папки core!
         cleaned_files = sorted([f.replace('\\', '/') for f in files if f])
         folder_nodes = {}
 
@@ -352,7 +402,6 @@ class GitDialog(QDialog):
                     if parent_node is None: self.file_tree.addTopLevelItem(node)
                     else: parent_node.addChild(node)
 
-        # Всегда сворачиваем дерево при загрузке, чтобы было аккуратно
         self.file_tree.collapseAll() 
         
         self.file_tree.blockSignals(False)
@@ -420,7 +469,6 @@ class GitDialog(QDialog):
             QMessageBox.information(self, "Пусто", "Нет изменений в выбранных файлах.")
             return
             
-        # Меняем текст кнопки и НЕ закрываем окно!
         self.btn_ai.setText("⏳ Ожидание ИИ...")
         self.btn_ai.setEnabled(False)
         self.parent_window.request_ai_commit_message(diff)
