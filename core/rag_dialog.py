@@ -23,15 +23,32 @@ class RAGAnalyticsDialog(QDialog):
             return (now - timedelta(days=1)).strftime("%Y-%m-%d")
         return now.strftime("%Y-%m-%d")
 
+    def _force_reset_quotas(self):
+        self.settings.setValue("rag_logical_date", "")
+        self.settings.setValue("rag_usage_dict", "{}")
+        self.settings.setValue("rag_exhausted_keys", "[]")
+        QMessageBox.information(self, "Сброс кэша", "Локальный кэш лимитов успешно сброшен!\n\nПожалуйста, переоткройте это окно для обновления данных.")
+        self.accept()
+
     def init_ui(self):
         layout = QVBoxLayout(self)
 
         # ==========================================
         # БЛОК А: ДИНАМИЧЕСКИЕ ЛИМИТЫ (АКТИВНЫЙ ПУЛ)
         # ==========================================
+        header_limits_layout = QHBoxLayout()
         lbl_limits = QLabel("📊 Текущий расход API (Логические сутки Google)")
         lbl_limits.setStyleSheet("font-size: 14px; font-weight: bold; color: #569cd6;")
-        layout.addWidget(lbl_limits)
+        header_limits_layout.addWidget(lbl_limits)
+        
+        btn_reset_cache = QPushButton("🔄 Сбросить кэш лимитов")
+        btn_reset_cache.setStyleSheet("background-color: #333333; color: #d4d4d4; padding: 4px 10px; border-radius: 3px; font-size: 11px;")
+        btn_reset_cache.setToolTip("Используйте, если график завис или показывает неверные данные после ошибок")
+        btn_reset_cache.clicked.connect(self._force_reset_quotas)
+        header_limits_layout.addStretch()
+        header_limits_layout.addWidget(btn_reset_cache)
+        
+        layout.addLayout(header_limits_layout)
 
         api_settings = QSettings("VibeCoder", "API_Config")
         emb_keys_str = api_settings.value("gemini_embedding_key", "").strip()
@@ -39,23 +56,20 @@ class RAGAnalyticsDialog(QDialog):
         
         active_keys = []
         
-        # Парсим JSON нового пула ключей
         if emb_keys_str:
             try:
                 keys_data = json.loads(emb_keys_str)
                 if isinstance(keys_data, list):
                     for item in keys_data:
-                        if item.get("enabled", True):  # Берем только включенные (с галочкой)
+                        if item.get("enabled", True): 
                             k = item.get("key", "").strip()
                             if k:
                                 active_keys.append({"key": k, "comment": item.get("comment", "")})
             except:
-                # Фоллбэк, если там старая строка
                 for k in emb_keys_str.split(','):
                     if k.strip():
                         active_keys.append({"key": k.strip(), "comment": ""})
                         
-        # Фоллбэк на основной ключ, если пул резервных пуст или все выключены
         if not active_keys and main_key_str:
             active_keys.append({"key": main_key_str, "comment": "Основной ключ (Фоллбэк)"})
                         
@@ -66,9 +80,9 @@ class RAGAnalyticsDialog(QDialog):
         else:
             logical_today = self._get_logical_day()
             
-            # Проверяем, не наступило ли 10:00 утра для сброса квот
-            if self.settings.value("rag_usage_date", "") != logical_today:
-                self.settings.setValue("rag_usage_date", logical_today)
+            # Используем новое имя переменной для жесткого сброса призраков прошлого
+            if self.settings.value("rag_logical_date", "") != logical_today:
+                self.settings.setValue("rag_logical_date", logical_today)
                 self.settings.setValue("rag_usage_dict", "{}")
                 self.settings.setValue("rag_exhausted_keys", "[]")
 
@@ -93,13 +107,12 @@ class RAGAnalyticsDialog(QDialog):
                 
                 progress = QProgressBar()
                 progress.setMaximum(max_requests)
+                progress.setValue(usage) # Теперь всегда показываем реальное значение
                 
                 if is_exhausted:
-                    progress.setValue(max_requests)
-                    progress.setFormat(" 🚨 ЛИМИТ ИСЧЕРПАН (БЛОКИРОВКА ДО 10:00) ")
+                    progress.setFormat(f" 🚨 ЛИМИТ ИСЧЕРПАН (Отправлено: {usage} из ~1500) ")
                     color = "#d32f2f"
                 else:
-                    progress.setValue(usage)
                     progress.setFormat(f" Отправлено запросов: {usage} (Ограничение: ~{max_requests}/сутки) ")
                     color = "#31a24c"
                     if usage > 1000: color = "#e6a822"
@@ -112,7 +125,7 @@ class RAGAnalyticsDialog(QDialog):
                 """)
                 layout.addWidget(progress)
                 
-        lbl_hint = QLabel("ℹ️ Квоты Google сбрасываются в 10:00 (00:00 PT).")
+        lbl_hint = QLabel("ℹ️ Квоты Google сбрасываются в 10:00 (00:00 PT). Счетчик показывает только локальные запросы IDE.")
         lbl_hint.setStyleSheet("color: #888888; font-size: 11px; margin-top: 2px;")
         layout.addWidget(lbl_hint)
         layout.addSpacing(15)
@@ -172,14 +185,13 @@ class RAGAnalyticsDialog(QDialog):
         self.table_stats.horizontalHeader().setStretchLastSection(True)
         self.table_stats.verticalHeader().setVisible(False)
         self.table_stats.setStyleSheet(self.table_db.styleSheet())
-        self.table_stats.verticalHeader().setDefaultSectionSize(60) # Побольше высоты для многострочных деталей
+        self.table_stats.verticalHeader().setDefaultSectionSize(60) 
         tab_stats_layout.addWidget(self.table_stats)
         self.tabs.addTab(tab_stats, "📈 Статистика API (Биллинг)")
 
         self.populate_db_table()
         self.populate_stats_table()
 
-        # Восстановление размеров колонок DB
         state = self.settings.value("rag_table_state")
         if state:
             self.table_db.horizontalHeader().restoreState(state)
@@ -258,7 +270,6 @@ class RAGAnalyticsDialog(QDialog):
         except:
             return
             
-        # Сортируем дни по убыванию (сначала свежие)
         sorted_dates = sorted(h_data.keys(), reverse=True)
         self.table_stats.setRowCount(len(sorted_dates))
         
@@ -268,7 +279,6 @@ class RAGAnalyticsDialog(QDialog):
             item_date = QTableWidgetItem(f"📅 {date_str}")
             item_date.setFlags(item_date.flags() & ~Qt.ItemFlag.ItemIsEditable)
             
-            # Если старый формат (просто число)
             if isinstance(day_info, int):
                 item_total = QTableWidgetItem()
                 item_total.setData(Qt.ItemDataRole.DisplayRole, day_info)
@@ -276,7 +286,6 @@ class RAGAnalyticsDialog(QDialog):
                 item_details = QTableWidgetItem("Нет детализации (Старый формат)")
                 item_details.setForeground(Qt.GlobalColor.darkGray)
             else:
-                # Новый формат (Словарь)
                 total = day_info.get("total", 0)
                 keys_dict = day_info.get("keys", {})
                 
