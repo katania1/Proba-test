@@ -1,6 +1,9 @@
 import os
 import base64
 import hashlib
+import json
+import uuid
+from datetime import datetime, timedelta
 from PyQt6.QtCore import QObject, pyqtSignal, QSettings
 from PyQt6.QtWidgets import QMessageBox, QApplication, QDialog
 
@@ -27,8 +30,10 @@ class AIController(QObject):
         self.bridge.on_result_received = lambda text: self.ai_response_signal.emit(text)
         self.bridge.on_limit_reached = lambda: self.limit_reached_signal.emit()
         
+        # --- ФИКС: СВЯЗЫВАЕМ СИГНАЛЫ С ФУНКЦИЯМИ ОБРАБОТКИ ---
         self.ai_response_signal.connect(self.process_ai_response)
         self.limit_reached_signal.connect(self.process_limit_reached)
+        # ---------------------------------------------------
         
         self.retry_count = 0
         self.is_waiting_for_commit_msg = False
@@ -37,11 +42,69 @@ class AIController(QObject):
         self.browser_mcp_step = 0
         self.max_browser_mcp_steps = 5
         self.agent_trace = []
+        self.current_trace_id = None # ID текущей сессии для привязки к БД логов
         
         # --- ПАМЯТЬ ДЛЯ ДЕТЕКТОРА "ДНЯ СУРКА" ---
         self.auto_heal_attempts = 0
         self.last_tool_result_hash = None
         self.last_tool_name = None
+
+    # =========================================================
+    # ДОЛГОСРОЧНАЯ ПАМЯТЬ ИНСПЕКТОРА (TTL 7 ДНЕЙ)
+    # =========================================================
+    def _save_current_trace(self):
+        if not self.agent_trace or not self.current_trace_id:
+            return
+            
+        trace_file = os.path.join(self.mw.project_path, ".vibecoder", "agent_traces.json")
+        os.makedirs(os.path.dirname(trace_file), exist_ok=True)
+        
+        traces = []
+        if os.path.exists(trace_file):
+            try:
+                with open(trace_file, 'r', encoding='utf-8') as f:
+                    traces = json.load(f)
+            except Exception:
+                pass
+        
+        # Убираем текущий трейс, если он уже есть (для динамической перезаписи шагов)
+        traces = [t for t in traces if t.get("id") != self.current_trace_id]
+        
+        # Формируем красивый заголовок из начала промпта
+        title_text = self.agent_trace[0].get("content", "")
+        if "=== ЗАДАЧА ПОЛЬЗОВАТЕЛЯ ===" in title_text:
+            title = title_text.split("=== ЗАДАЧА ПОЛЬЗОВАТЕЛЯ ===")[-1].strip()[:100]
+        else:
+            title = title_text[:100]
+        title = title.replace('\n', ' ') + "..."
+        
+        record = {
+            "id": self.current_trace_id,
+            "timestamp": datetime.now().isoformat(),
+            "title": title,
+            "steps": self.agent_trace
+        }
+        
+        traces.append(record)
+        
+        # Авто-очистка логов старше 7 дней
+        cutoff = datetime.now() - timedelta(days=7)
+        valid_traces = []
+        for t in traces:
+            try:
+                t_date = datetime.fromisoformat(t.get("timestamp", ""))
+                if t_date > cutoff:
+                    valid_traces.append(t)
+            except:
+                pass # Пропускаем сломанные даты
+                
+        try:
+            with open(trace_file, 'w', encoding='utf-8') as f:
+                json.dump(valid_traces, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            self.mw.log_system(f"Ошибка сохранения лога инспектора: {e}", color="#ff4444")
+
+    # =========================================================
 
     def start(self):
         self.bridge.start_server()
@@ -49,21 +112,21 @@ class AIController(QObject):
     def estimate_tokens(self, text):
         return int(len(text) / 2.5)
 
-    # =========================================================
-    # ФАЗА 29: ПЕРЕХВАТЧИК ОШИБОК ИЗ ТЕРМИНАЛА
-    # =========================================================
     def handle_terminal_error(self, error_text):
         """Принимает сигнал от терминала и запускает цикл авто-лечения"""
         engine_data = self.mw.get_selected_engine_data()
         is_browser = engine_data.get("provider_id", "Browser") == "Browser"
 
-        # 1. Красивое визуальное отображение в чате
         self.mw.chat_logger.log("SYSTEM", f"Перехват ошибки терминала:\n{error_text}")
         
+        # Генерируем уникальный ID трейса для привязки логов
+        self.current_trace_id = str(uuid.uuid4())[:12]
         safe_error = error_text.replace('<', '&lt;').replace('>', '&gt;').replace('\n', '<br>')
+        
+        # Оборачиваем заголовок в невидимую ссылку trace://
         ui_alert = (
             f"<div style='border: 1px solid #d32f2f; background-color: #3b1b1b; padding: 10px; border-radius: 5px; margin: 10px 0;'>"
-            f"<b style='color: #ff4444;'>🚨 [АВТО-ОТЛАДКА] Перехвачена ошибка из системного терминала:</b><br><br>"
+            f"<a href='trace://{self.current_trace_id}' style='text-decoration: none;'><b style='color: #ff4444;'>🚨 [АВТО-ОТЛАДКА] Перехвачена ошибка из системного терминала:</b></a><br><br>"
             f"<span style='color: #d4d4d4; font-family: Consolas, monospace; font-size: 12px;'>{safe_error}</span><br><br>"
             f"<b style='color: #e6a822;'>⚙️ Формирую системную задачу и передаю ИИ...</b>"
             f"</div>"
@@ -71,7 +134,6 @@ class AIController(QObject):
         self.mw.chat_history.append(ui_alert)
         self.mw.scroll_chat()
 
-        # 2. Подготовка промпта
         marker = '`' * 3
         system_text = (
             "[СИСТЕМНОЕ СООБЩЕНИЕ: АВТО-ОТЛАДКА]\n"
@@ -81,13 +143,12 @@ class AIController(QObject):
             "Если причина в отсутствии библиотеки — вызови инструмент 'run_terminal_command' (pip install ...)."
         )
 
-        # Сброс состояния агента
         self.auto_heal_attempts = 0
         self.last_tool_result_hash = None
         self.last_tool_name = None
         self.agent_trace = [{"title": "Перехват ошибки терминала", "content": system_text}]
+        self._save_current_trace()
 
-        # 3. Маршрутизация (Браузер или API)
         if is_browser:
             self.mw.last_full_prompt = system_text
             self.mw.tokens_sent += self.estimate_tokens(self.mw.last_full_prompt)
@@ -106,13 +167,13 @@ class AIController(QObject):
             self.retry_count = 0 
             self.execute_api_task(engine_data.get("provider_id"), engine_data.get("model"))
 
-    # =========================================================
-
     def send_task(self, is_coding_mode=True):
         user_text = self.mw.prompt_input.toPlainText().strip()
         if not user_text: return
         
+        self.current_trace_id = str(uuid.uuid4())[:12]
         self.agent_trace = []
+        
         engine_data = self.mw.get_selected_engine_data()
         provider_id = engine_data.get("provider_id", "Browser")
         selected_model = engine_data.get("model", "")
@@ -140,10 +201,13 @@ class AIController(QObject):
         media_notice = f" <i>(+ {len(payload['image_paths'])} картинки)</i>" if payload['image_paths'] else ""
         mode_notice = "⚡ Кодинг" if is_coding_mode else "💬 Чат"
         
-        self.mw.chat_history.append(f"<br><span style='color: #569cd6;'><b>ВЫ</b> [{mode_notice}] (в <i>{tab_display_name}</i>){media_notice}<b>:</b> {user_text}</span>")
+        # Оборачиваем "ВЫ" в невидимую ссылку trace://
+        self.mw.chat_history.append(f"<br><span style='color: #569cd6;'><a href='trace://{self.current_trace_id}' style='color: #569cd6; text-decoration: none;'><b>ВЫ</b></a> [{mode_notice}] (в <i>{tab_display_name}</i>){media_notice}<b>:</b> {user_text}</span>")
         self.mw.scroll_chat()
         
         self.agent_trace.append({"title": f"Исходный запрос ({mode_notice})", "content": self.mw.last_full_prompt})
+        self._save_current_trace()
+        
         self.mw.tokens_sent += self.estimate_tokens(self.mw.last_full_prompt)
         self.mw.update_status_bar()
         self.retry_count = 0 
@@ -384,6 +448,7 @@ class AIController(QObject):
 
         step_suffix = f" (Шаг {self.browser_mcp_step + 1})" if self.browser_mcp_step > 0 else ""
         self.agent_trace.append({"title": f"Ответ от ИИ{step_suffix}", "content": raw_text})
+        self._save_current_trace()
 
         marker = '`' * 3
         clean_result = raw_text.replace(f'{marker}json', '').replace(marker, '').strip()
@@ -433,6 +498,8 @@ class AIController(QObject):
             next_prompt = f"Результат выполнения '{tool_name}':\n---\n{tool_result}\n---{warning_block}\n\nЕсли информации достаточно, дай финальный ответ. Иначе - вызови следующий инструмент."
             
             self.agent_trace.append({"title": f"Результат '{tool_name}'", "content": next_prompt})
+            self._save_current_trace()
+            
             self.mw.chat_history.append(f"<div style='color: #858585; font-size: 12px; margin-left: 20px;'>📥 Данные получены, жду решения ИИ...</div>")
             self.mw.scroll_chat()
             
@@ -467,6 +534,7 @@ class AIController(QObject):
             )
             
             self.agent_trace.append({"title": f"Авто-исправление ошибки (Попытка {self.retry_count})", "content": fix_prompt})
+            self._save_current_trace()
             
             if engine_data.get("provider_id") == "Browser":
                 self.bridge.add_task(fix_prompt, target_id=self.mw.get_current_target_id())
@@ -556,9 +624,12 @@ class AIController(QObject):
                                 "Твой ответ отклонен системой (Smart Diff Error).\n"
                                 f"Я не нашел следующий блок 'search' в файле {rel_path}:\n"
                                 f"{marker}python\n{failed_search_block}\n{marker}\n"
-                                "Пожалуйста, скопируй ТОЧНЫЕ строки из моего исходного файла в поле 'search'. Или оставь 'search' пустым, если пишешь файл с нуля. Повтори JSON."
+                                "Пожалуйста, скопируй ТОЧНЫЕ строки из моего исходного файла в поле 'search'. Или оставь 'search' пустым, если пишешь файл с нуля. "
+                                "🚨 СПАСАТЕЛЬНОЕ ПРАВИЛО: Если ты не видишь точного исходного кода этого файла перед глазами — остановись! Верни JSON только с заполненным массивом `request_files` (оставив `updates` пустым), чтобы я прислал тебе этот файл целиком, и только потом делай замены.\n"
+                                "Повтори JSON."
                             )
                             self.agent_trace.append({"title": f"Запрос переделки Smart Diff (Попытка {self.retry_count})", "content": error_prompt})
+                            self._save_current_trace()
                             
                             if engine_data.get("provider_id") == "Browser":
                                 self.bridge.add_task(error_prompt, target_id=self.mw.get_current_target_id())

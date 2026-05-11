@@ -35,11 +35,6 @@ class IndexerWorker(QThread):
             return ""
 
     def _get_logical_day(self):
-        """
-        Возвращает логическую дату для квот Google.
-        Квоты обнуляются в 10:00 (00:00 PT).
-        До 10:00 утра считается "вчерашний" день квот.
-        """
         now = datetime.now()
         if now.hour < 10:
             logical_date = now - timedelta(days=1)
@@ -59,6 +54,8 @@ class IndexerWorker(QThread):
                 return
                 
             files_to_index = self._gather_files()
+            if not self.is_running: return
+            
             indexed_files = self.db.get_indexed_files()
             rel_files_to_index = set(os.path.relpath(f, self.project_path).replace('\\', '/') for f in files_to_index)
             
@@ -112,7 +109,6 @@ class IndexerWorker(QThread):
                     processed_count += 1
                     time.sleep(0.5) 
                 except Exception as e:
-                    # 🚨 ЖЕСТКИЙ СТОП при критических ошибках API
                     if "QUOTA_EXCEEDED" in str(e) or "CRITICAL_API_ERROR" in str(e):
                         is_quota_error = True
                         break
@@ -187,10 +183,8 @@ class IndexerWorker(QThread):
                     current_key = getattr(self.embed_provider, 'api_key', 'unknown')
                     vector = self.embed_provider.get_embedding(context_text)
                     
-                    # --- УМНЫЙ УЧЕТ ЛИМИТОВ (Сброс в 10:00) ---
                     logical_today = self._get_logical_day()
                     
-                    # 🚨 ИСПРАВЛЕНИЕ: ИСПОЛЬЗУЕМ rag_logical_date для синхронизации с UI
                     if self.settings.value("rag_logical_date", "") != logical_today:
                         self.settings.setValue("rag_logical_date", logical_today)
                         self.settings.setValue("rag_usage_dict", "{}")
@@ -200,7 +194,6 @@ class IndexerWorker(QThread):
                     usage_dict[current_key] = usage_dict.get(current_key, 0) + 1
                     self.settings.setValue("rag_usage_dict", json.dumps(usage_dict))
                         
-                    # --- ПРОДВИНУТЫЙ ИСТОРИЧЕСКИЙ ЛОГГЕР ---
                     core_dir = os.path.dirname(os.path.abspath(__file__))
                     config_dir = os.path.join(os.path.dirname(core_dir), "config", "VibeCoder")
                     os.makedirs(config_dir, exist_ok=True)
@@ -213,11 +206,9 @@ class IndexerWorker(QThread):
                                 h_data = json.load(hist_f)
                         except: pass
                     
-                    # Защита от старого формата истории (когда значение было int)
                     if logical_today not in h_data or isinstance(h_data.get(logical_today), int):
                         h_data[logical_today] = {"total": 0, "keys": {}}
                         
-                    # Формируем красивое имя ключа с комментарием
                     comment = EmbeddingFactory._key_comments.get(current_key, "")
                     masked = f"{current_key[:6]}...{current_key[-4:]}" if len(current_key) > 10 else "***"
                     key_label = f"{masked} ({comment})" if comment else masked
@@ -262,7 +253,6 @@ class IndexerWorker(QThread):
                         else:
                             raise Exception(f"Превышен лимит попыток (ошибка 429): {e}")
                     else:
-                        # 🚨 ЖЕСТКИЙ СТОП ПРИ ЛЮБЫХ ДРУГИХ ОШИБКАХ API
                         self.is_running = False
                         msg = f"🚨 Критическая ошибка ключа {masked}: {str(e)}"
                         if not self.silent: self.log_signal.emit(msg, "#ff4444")

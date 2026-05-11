@@ -69,6 +69,17 @@ class ExternalMCPClient:
         })
         return resp.get("result", {})
 
+    def shutdown(self):
+        """Хирургически отключает постоянные потоки ввода-вывода MCP-сервера."""
+        try:
+            self.process.terminate()
+            self.process.wait(timeout=2)
+        except Exception:
+            try:
+                self.process.kill()
+            except Exception:
+                pass
+
 
 class MCPManager:
     def __init__(self, project_path):
@@ -79,7 +90,6 @@ class MCPManager:
         self.status = "offline" 
         self.error_message = "MCP не инициализирован"
         
-        # ВСТАВЬ СВОЙ КЛЮЧ ОТ CONTEXT7 СЮДА:
         self.context7_api_key = "ctx7sk-53f7a253-a33f-4b82-b243-6eae7aa3a016" 
         
         self._init_external_servers()
@@ -126,12 +136,11 @@ class MCPManager:
                     }
                 }
             },
-            # --- НОВЫЙ ИНСТРУМЕНТ ФАЗЫ 34 ---
             {
                 "type": "function",
                 "function": {
                     "name": "analyze_log",
-                    "description": "Интеллектуальный парсер текстовых файлов и логов. Читает гигантские файлы, не забивая оперативную память. Используй его для поиска ошибок (Traceback, Exception) в логах.",
+                    "description": "Интеллектуальный парсер текстовых файлов и логов. ПРЕДУПРЕЖДЕНИЕ: Инструмент предназначен ТОЛЬКО для .log и .txt файлов. ЗАПРЕЩЕНО использовать его для чтения исходного кода проекта (.py, .js и т.д.) — это приведет к ошибкам. Если нужно прочитать код, запрашивайте его строго через массив request_files.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -176,6 +185,14 @@ class MCPManager:
     def get_tools_schema(self):
         return self.internal_tools + self.external_tools
 
+    def update_project_path(self, new_path):
+        """Обеспечивает чистую маршрутизацию контекста при динамической смене рабочих областей."""
+        self.project_path = new_path
+        if self.external_client:
+            self.external_client.shutdown()
+            self.external_tools.clear()
+            self._init_external_servers()
+
     def execute_tool(self, tool_name, kwargs):
         try:
             if tool_name == "web_search":
@@ -197,16 +214,10 @@ class MCPManager:
         except Exception as e:
             return f"Ошибка выполнения инструмента {tool_name}: {str(e)}"
 
-    # ==========================================
-    # РЕАЛИЗАЦИЯ ЛОКАЛЬНЫХ ИНСТРУМЕНТОВ
-    # ==========================================
-
     def _tool_analyze_log(self, file_path, keyword=None, tail_lines=50, context_lines=5):
-        """Интеллектуальный ленивый парсер логов (Фаза 34)"""
         abs_path = os.path.abspath(os.path.join(self.project_path, file_path))
         project_abs = os.path.abspath(self.project_path)
         
-        # Защита от выхода за пределы проекта
         if not os.path.commonpath([project_abs]) == os.path.commonpath([project_abs, abs_path]):
             return "❌ Ошибка: доступ к файлам вне директории проекта запрещен."
             
@@ -216,13 +227,11 @@ class MCPManager:
         try:
             file_size_mb = os.path.getsize(abs_path) / (1024 * 1024)
             
-            # Если ключевое слово не задано, отдаем просто "хвост" файла
             if not keyword:
                 with open(abs_path, 'r', encoding='utf-8', errors='replace') as f:
                     tail = collections.deque(f, maxlen=tail_lines)
                 return f"📄 Последние {len(tail)} строк файла {file_path} ({file_size_mb:.1f} MB):\n\n" + "".join(tail)
 
-            # Если задан поиск с контекстом
             results = []
             with open(abs_path, 'r', encoding='utf-8', errors='replace') as f:
                 before_buffer = collections.deque(maxlen=context_lines)
@@ -230,22 +239,18 @@ class MCPManager:
                 current_match_block = []
                 
                 for line_num, line in enumerate(f, 1):
-                    # Если мы находимся в режиме записи строк ПОСЛЕ совпадения
                     if lines_after_match > 0:
                         current_match_block.append(f"{line_num}: {line.rstrip()}")
                         lines_after_match -= 1
                         
-                        # Блок завершен
                         if lines_after_match == 0:
                             results.append("\n".join(current_match_block))
                             current_match_block = []
-                            # Ограничиваем выдачу 5 совпадениями, чтобы не сжечь токены ИИ
                             if len(results) >= 5:
                                 results.append("\n... [ПОКАЗАНЫ ПЕРВЫЕ 5 СОВПАДЕНИЙ, ОСТАЛЬНЫЕ ОБРЕЗАНЫ ДЛЯ ЭКОНОМИИ КОНТЕКСТА]")
                                 break
                         continue
                         
-                    # Если нашли совпадение
                     if keyword.lower() in line.lower():
                         current_match_block.append(f"--- Найден блок (строка {line_num}) ---")
                         for b_line_num, b_line in before_buffer:
@@ -255,7 +260,6 @@ class MCPManager:
                     else:
                         before_buffer.append((line_num, line))
                         
-                # На случай, если файл закончился до того, как блок контекста 'после' заполнился
                 if current_match_block:
                      results.append("\n".join(current_match_block))
                      

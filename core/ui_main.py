@@ -1,11 +1,13 @@
 import os
 import re
 import base64
+import json
+from datetime import datetime
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QSplitter, 
                              QVBoxLayout, QDialog, QTabWidget, QTextBrowser, 
                              QLabel, QFileDialog, QPushButton, QMessageBox, QSizePolicy, QApplication)
 from PyQt6.QtCore import Qt, QDir, QUrl, QSettings, QEvent, QFileSystemWatcher
-from PyQt6.QtGui import QShortcut, QKeySequence
+from PyQt6.QtGui import QShortcut, QKeySequence, QAction
 
 # Импорты ядра
 from core.editor import DarkPythonEditor
@@ -233,7 +235,7 @@ class MainWindow(QMainWindow):
         self.btn_nav_back = QPushButton("◀")
         self.btn_nav_forward = QPushButton("▶")
         self.btn_tab_search = QPushButton("🔍")
-        self.btn_tab_save = QPushButton("💾") # НОВАЯ КНОПКА СОХРАНЕНИЯ
+        self.btn_tab_save = QPushButton("💾")
         
         btn_corner_style = """
             QPushButton { 
@@ -263,12 +265,12 @@ class MainWindow(QMainWindow):
         self.btn_nav_back.setToolTip("Отменить изменение (Undo)")
         self.btn_nav_forward.setToolTip("Вернуть изменение (Redo)")
         self.btn_tab_search.setToolTip("Поиск по коду (Ctrl+F)")
-        self.btn_tab_save.setToolTip("Сохранить файл (Ctrl+S)") # ПОДСКАЗКА ДЛЯ КНОПКИ
+        self.btn_tab_save.setToolTip("Сохранить файл (Ctrl+S)")
 
         self.btn_nav_back.clicked.connect(self.nav_go_back)
         self.btn_nav_forward.clicked.connect(self.nav_go_forward)
         self.btn_tab_search.clicked.connect(self.toggle_active_search)
-        self.btn_tab_save.clicked.connect(self._manual_save_wrapper) # ПРИВЯЗКА К ФУНКЦИИ
+        self.btn_tab_save.clicked.connect(self._manual_save_wrapper) 
         
         self.editor_tabs.setCornerWidget(self.corner_widget, Qt.Corner.TopRightCorner)
 
@@ -361,14 +363,120 @@ class MainWindow(QMainWindow):
     def get_current_target_id(self):
         return self.status_bar.get_current_target_id()
 
+    # =========================================================
+    # ЛОГИКА ЭКСПОРТА DEBUG-ЛОГОВ И КЛИКОВ
+    # =========================================================
     def show_chat_context_menu(self, pos):
         menu = self.chat_history.createStandardContextMenu()
+        
+        # Проверяем, есть ли ссылка trace:// под курсором
+        anchor = self.chat_history.anchorAt(pos)
+        if anchor.startswith("trace://"):
+            trace_id = anchor.replace("trace://", "")
+            menu.addSeparator()
+            
+            act_copy = QAction("📋 Скопировать Debug-пакет для анализа", self)
+            act_copy.triggered.connect(lambda: self.export_debug_log(trace_id, to_file=False))
+            
+            act_save = QAction("💾 Сохранить Debug-пакет как .txt", self)
+            act_save.triggered.connect(lambda: self.export_debug_log(trace_id, to_file=True))
+            
+            menu.addAction(act_copy)
+            menu.addAction(act_save)
+            
         menu.addSeparator()
         action_clear = menu.addAction("🗑️ Очистить окно чата")
         action = menu.exec(self.chat_history.viewport().mapToGlobal(pos))
         if action == action_clear:
             self.chat_history.clear()
             self.log_system("Окно чата очищено (история сохранена в базе данных).")
+
+    def export_debug_log(self, trace_id, to_file=True):
+        """Собирает Чат + Систему + Трейс в один ультимативный отчет"""
+        trace_file = os.path.join(self.project_path, ".vibecoder", "agent_traces.json")
+        if not os.path.exists(trace_file):
+            self.show_popup("Ошибка экспорта", "Файл с логами агента не найден.", is_error=True)
+            return
+
+        try:
+            with open(trace_file, 'r', encoding='utf-8') as f:
+                traces = json.load(f)
+            
+            # Ищем нужный лог
+            trace_data = next((t for t in traces if t["id"] == trace_id), None)
+            if not trace_data:
+                self.log_system("❌ Ошибка: Лог сессии не найден в архиве.", color="#ff4444")
+                return
+
+            # Формируем документ
+            lines = [
+                f"=== VIBECODER DEBUG REPORT ===",
+                f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                f"Project: {self.project_path}",
+                f"Trace ID: {trace_id}",
+                f"Engine: {self.get_selected_engine_data().get('model', 'Unknown')}",
+                "-" * 40,
+                "\n[БЛОК А: КОНТЕКСТ ЧАТА (Последние сообщения)]"
+            ]
+            
+            # Берем последние 10 сообщений из логгера для понимания нити беседы
+            chat_logs = self.chat_logger.get_all()[-10:]
+            for log in chat_logs:
+                lines.append(f"[{log['role']}]: {log['content'][:500]}{'...' if len(log['content']) > 500 else ''}")
+
+            lines.append("\n" + "="*40)
+            lines.append("[БЛОК Б: СКРЫТЫЙ СЛЕД АГЕНТА (TRACE)]")
+            
+            for i, step in enumerate(trace_data["steps"], 1):
+                lines.append(f"\n--- ШАГ {i}: {step.get('title', 'Unknown')} ---")
+                lines.append(step.get("content", ""))
+
+            final_text = "\n".join(lines)
+
+            if to_file:
+                file_name, _ = QFileDialog.getSaveFileName(
+                    self, "Сохранить лог для анализа", 
+                    os.path.expanduser(f"~/Desktop/VibeDebug_{trace_id}.txt"), 
+                    "Text Files (*.txt)"
+                )
+                if file_name:
+                    with open(file_name, 'w', encoding='utf-8') as f:
+                        f.write(final_text)
+                    self.log_system(f"✅ Отладочный лог сохранен: {os.path.basename(file_name)}", color="#31a24c")
+            else:
+                QApplication.clipboard().setText(final_text)
+                self.log_system("📋 Debug-пакет скопирован в буфер обмена.", color="#31a24c")
+
+        except Exception as e:
+            self.show_popup("Ошибка экспорта", f"Не удалось собрать пакет: {e}", is_error=True)
+
+    def handle_chat_link(self, url: QUrl):
+        url_str = url.toString()
+        
+        # --- Перехват кликов по скрытым логам инспектора ---
+        if url_str.startswith("trace://"):
+            trace_id = url.host() if url.host() else url_str.replace("trace://", "")
+            self.open_inspector(trace_id=trace_id)
+            return
+            
+        if url_str.startswith("copycode://"):
+            try:
+                block_id = url_str.split("copycode://")[1]
+                raw_code = self.ai_controller.orchestrator.code_blocks_memory.get(block_id, "")
+                if raw_code:
+                    QApplication.clipboard().setText(raw_code)
+                    self.log_system("📋 Код успешно скопирован в буфер обмена!", color="#31a24c", is_bold=True)
+                else:
+                    self.log_system("❌ Ошибка: Код устарел или не найден в памяти сессии.", color="#d32f2f", is_bold=True)
+            except Exception as e:
+                self.log_system(f"❌ Ошибка копирования кода: {e}", color="#d32f2f", is_bold=True)
+            return
+        
+        if "relay" in url_str:
+            entry_id = url.path() if url.scheme() == "relay" else url_str.split(":")[-1]
+            entry = self.chat_logger.get_by_id(entry_id)
+            if entry and entry.get("hidden_data"):
+                self.show_raw_text_dialog("Текст Эстафеты", entry["hidden_data"])
 
     def open_api_settings(self):
         dialog = APISettingsDialog(self)
@@ -408,9 +516,6 @@ class MainWindow(QMainWindow):
     def trigger_silent_rag_update(self):
         self.rag_controller.trigger_silent_update()
 
-    # =========================================================
-    # ФИКС: ПЕРЕКЛЮЧЕНИЕ ПРОЕКТА С ПОЛНОЙ ИЗОЛЯЦИЕЙ КОНТЕКСТА
-    # =========================================================
     def handle_project_changed(self, new_path):
         self.project_path = new_path
         self.settings.setValue("last_project_path", new_path)
@@ -422,25 +527,24 @@ class MainWindow(QMainWindow):
         self.prompt_input.project_path = new_path
         self.terminal.update_project_path(new_path)
         
-        # --- ФИКС УТЕЧКИ КОНТЕКСТА ---
-        # 1. Обновляем путь в MCP менеджере
+        # --- ФИКС УТЕЧКИ КОНТЕКСТА (ОБНОВИТЕ ЭТОТ БЛОК) ---
         if hasattr(self.ai_controller, 'mcp_manager'):
-            self.ai_controller.mcp_manager.project_path = new_path
+            # ВМЕСТО: self.ai_controller.mcp_manager.project_path = new_path
+            # ИСПОЛЬЗУЕМ ВЫЗОВ МЕТОДА:
+            self.ai_controller.mcp_manager.update_project_path(new_path)
 
-        # 2. Пересоздаем RagController, чтобы он инициализировал VectorDatabase с новым путем
-        try:
-            self.btn_rag.customContextMenuRequested.disconnect()
-        except:
-            pass
+        # --- ФИКС: ОЧИСТКА СТАРЫХ ПОТОКОВ RAG ПЕРЕД ПЕРЕСОЗДАНИЕМ ---
+        if hasattr(self, 'rag_controller') and self.rag_controller:
+            self.rag_controller.cleanup()
+            try:
+                self.btn_rag.customContextMenuRequested.disconnect()
+            except:
+                pass
             
         self.rag_controller = RagController(self)
         self.rag_controller.setup_watcher()
-        
-        # Снова подключаем аналитику к новому контроллеру
         self.btn_rag.customContextMenuRequested.connect(self.rag_controller.show_analytics)
-        # -----------------------------
         
-        # Очистка старых вотчеров файлов
         for p in self.file_watcher.files():
             self.file_watcher.removePath(p)
             
@@ -448,7 +552,6 @@ class MainWindow(QMainWindow):
         self.editor_tabs.clear()
         self.current_file_path = None
         
-        # Восстановление вкладок для нового проекта
         project_hash = os.path.basename(new_path)
         saved_tabs = self.settings.value(f"session_tabs_{project_hash}", [])
         
@@ -469,7 +572,8 @@ class MainWindow(QMainWindow):
         self.attachment_panel.clear()
         
         self.chat_history.clear()
-        self.log_system(f"Проект успешно загружен: {os.path.basename(new_path)}")
+        self.log_system(f"📁 Проект успешно загружен: {os.path.basename(new_path)}", color="#31a24c", is_bold=True)
+        self.log_system("🚨 ВНИМАНИЕ: Если вы работаете через Browser-режим, обязательно откройте НОВЫЙ ЧАТ в Gemini, чтобы сбросить контекст старых файлов!", color="#ffaa00", is_bold=True)
         
         self._check_project_environment()
         self._load_recent_chat_history()
@@ -586,34 +690,12 @@ class MainWindow(QMainWindow):
         else: self.attached_files.discard(filename)
         self.prompt_input.highlighter.rehighlight()
 
-    def handle_chat_link(self, url: QUrl):
-        url_str = url.toString()
-        
-        if url_str.startswith("copycode://"):
-            try:
-                block_id = url_str.split("copycode://")[1]
-                raw_code = self.ai_controller.orchestrator.code_blocks_memory.get(block_id, "")
-                if raw_code:
-                    QApplication.clipboard().setText(raw_code)
-                    self.log_system("📋 Код успешно скопирован в буфер обмена!", color="#31a24c", is_bold=True)
-                else:
-                    self.log_system("❌ Ошибка: Код устарел или не найден в памяти сессии.", color="#d32f2f", is_bold=True)
-            except Exception as e:
-                self.log_system(f"❌ Ошибка копирования кода: {e}", color="#d32f2f", is_bold=True)
-            return
-        
-        if "relay" in url_str:
-            entry_id = url.path() if url.scheme() == "relay" else url_str.split(":")[-1]
-            entry = self.chat_logger.get_by_id(entry_id)
-            if entry and entry.get("hidden_data"):
-                self.show_raw_text_dialog("Текст Эстафеты", entry["hidden_data"])
-
-    def open_inspector(self):
+    def open_inspector(self, trace_id=None):
         trace = getattr(self.ai_controller, 'agent_trace', [])
-        if not trace:
+        if not trace and not trace_id:
             self.show_raw_text_dialog("Сырой запрос к ИИ", self.last_full_prompt or "Пока нет данных. Отправьте запрос.")
         else:
-            dlg = InspectorDialog(self, trace)
+            dlg = InspectorDialog(self, trace, trace_id=trace_id)
             dlg.exec()
 
     def show_raw_text_dialog(self, title, text):

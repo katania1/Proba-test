@@ -1,17 +1,37 @@
 import logging
 from flask import Flask, request, jsonify
-from flask_cors import CORS
 import threading
 import time
 
 class VibeBridge:
     def __init__(self):
         self.app = Flask(__name__)
-        CORS(self.app)
         
         # Отключаем спам в консоли от Flask
         log = logging.getLogger('werkzeug')
         log.setLevel(logging.ERROR)
+
+        # === УЛЬТИМАТИВНЫЙ ФИКС CORS и PNA (БЕЗ СТОРОННИХ БИБЛИОТЕК) ===
+        @self.app.before_request
+        def handle_preflight():
+            # Мгновенно и правильно отвечаем на параноидальные проверки Chrome (Preflight)
+            if request.method == "OPTIONS":
+                res = jsonify({})
+                res.headers.add('Access-Control-Allow-Origin', '*')
+                res.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization, Access-Control-Request-Private-Network')
+                res.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+                res.headers.add('Access-Control-Allow-Private-Network', 'true')
+                return res, 200
+
+        @self.app.after_request
+        def add_cors_headers(response):
+            # Добавляем правильные заголовки ко всем обычным ответам сервера
+            if request.method != "OPTIONS": 
+                response.headers.add('Access-Control-Allow-Origin', '*')
+                response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+                response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+                response.headers.add('Access-Control-Allow-Private-Network', 'true')
+            return response
 
         self.task_queue = []
         self.lock = threading.Lock()
@@ -43,6 +63,7 @@ class VibeBridge:
         @self.app.route('/heartbeat', methods=['POST'])
         def heartbeat():
             data = request.json
+            if not data: return jsonify({"status": "ok"})
             t_id = data.get('tab_id')
             t_name = data.get('tab_name', 'Gemini Tab')
             if t_id:

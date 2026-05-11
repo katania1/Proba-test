@@ -1,5 +1,7 @@
 /**
- * 📖 БИБЛИЯ ПРОЕКТА: CONTENT.JS (v3.0 - VIRTUAL FILE SYSTEM & DOUBLE-TAP INJECTION)
+ * 📖 БИБЛИЯ ПРОЕКТА: CONTENT.JS (v4.3 - VISUAL HANDSHAKE & ANTI-THINKING)
+ * Интегрирована гарантированная доставка VFS: скрипт дожидается фактической 
+ * отрисовки UI-чипов файлов и разблокировки кнопки отправки в чистом чате.
  */
 
 let myTabId = sessionStorage.getItem('vc_tab_id');
@@ -9,9 +11,20 @@ if (!myTabId) {
 }
 let myTabName = localStorage.getItem(`vc_name_${myTabId}`) || myTabId;
 
-// Глобальный флаг для ручного продолжения работы на Flash-версии
 window.ignoreLimitsSession = false;
+window.textBeforeSend = "";
+window.waitingForNewBubble = false;
+window.waitStartTime = 0;
 
+const SERVER_URL = "http://localhost:5070";
+let isProcessing = false;
+let currentCandidateText = "";
+let stableCount = 0;
+let lastServerState = "STOPPED";
+let activeTaskId = null;
+let isLimitReached = false;
+
+// Пульс (Heartbeat) для поддержания связи с сервером Flask
 setInterval(() => {
     fetch('http://localhost:5070/heartbeat', {
         method: 'POST',
@@ -20,144 +33,67 @@ setInterval(() => {
     }).catch(() => {}); 
 }, 2000);
 
-// === КОМПАКТНАЯ ПЛАШКА С ФУНКЦИЕЙ ПЕРЕТАСКИВАНИЯ (DRAG & DROP) ===
+// ==========================================================
+// 1. ПЛАШКА UI (Draggable Badge)
+// ==========================================================
 function createVibeBadge() {
     if (document.getElementById('vibe-coder-badge')) return;
-
     const badge = document.createElement('div');
     badge.id = 'vibe-coder-badge';
-    
     badge.innerHTML = `
         <div style="display: flex; align-items: center; width: 100%;">
-            <span id="vibe-drag-handle" style="margin-right: 8px; opacity: 0.5; font-size: 16px;" title="Потяните, чтобы переместить">⠿</span>
+            <span id="vibe-drag-handle" style="margin-right: 8px; opacity: 0.5; font-size: 16px;">⠿</span>
             🤖 <b>VibeCoder:</b> 
-            <span id="vibe-tab-name" style="cursor:pointer; border-bottom: 1px dashed #888; margin-left: 5px; margin-right: 8px;" title="Кликните, чтобы переименовать вкладку">${myTabName}</span>
+            <span id="vibe-tab-name" style="cursor:pointer; border-bottom: 1px dashed #888; margin-left: 5px; margin-right: 8px;">${myTabName}</span>
             <span id="vibe-status" style="font-size: 11px; padding: 2px 6px; border-radius: 4px; background: #3c3c3c; color: #fff; font-weight: bold;">⏳ Загрузка...</span>
         </div>
     `;
-    
-    const savedLeft = localStorage.getItem('vc_badge_left') || '20px';
-    const savedTop = localStorage.getItem('vc_badge_top') || (window.innerHeight - 60) + 'px';
-
     Object.assign(badge.style, {
-        position: 'fixed', left: savedLeft, top: savedTop,
+        position: 'fixed', left: '20px', top: (window.innerHeight - 60) + 'px',
         backgroundColor: 'rgba(30, 30, 30, 0.85)', backdropFilter: 'blur(5px)',
         color: '#d4d4d4', padding: '8px 15px', borderRadius: '8px',
-        border: '1px solid #569cd6', fontFamily: 'sans-serif', fontSize: '13px',
-        zIndex: '999999', boxShadow: '0 4px 6px rgba(0,0,0,0.3)',
-        display: 'flex', alignItems: 'center', userSelect: 'none', cursor: 'grab'
+        border: '1px solid #569cd6', zIndex: '999999', cursor: 'grab', userSelect: 'none'
     });
-
-    let isDragging = false;
-    let hasMoved = false;
-    let offsetX, offsetY;
-
-    badge.onmousedown = function(e) {
-        if (e.target.id === 'vibe-tab-name') return; 
-        
+    
+    let isDragging = false, offsetX, offsetY;
+    badge.onmousedown = (e) => {
+        if (e.target.id === 'vibe-tab-name') return;
         isDragging = true;
-        hasMoved = false;
         offsetX = e.clientX - badge.getBoundingClientRect().left;
         offsetY = e.clientY - badge.getBoundingClientRect().top;
-        badge.style.cursor = 'grabbing';
-
-        document.onmousemove = function(e) {
+        document.onmousemove = (ev) => {
             if (isDragging) {
-                hasMoved = true;
-                let newLeft = e.clientX - offsetX;
-                let newTop = e.clientY - offsetY;
-                
-                newLeft = Math.max(0, Math.min(newLeft, window.innerWidth - badge.offsetWidth));
-                newTop = Math.max(0, Math.min(newTop, window.innerHeight - badge.offsetHeight));
-                
-                badge.style.left = newLeft + 'px';
-                badge.style.top = newTop + 'px';
+                badge.style.left = (ev.clientX - offsetX) + 'px';
+                badge.style.top = (ev.clientY - offsetY) + 'px';
             }
         };
-
-        document.onmouseup = function() {
-            isDragging = false;
-            badge.style.cursor = 'grab';
-            document.onmousemove = null;
-            document.onmouseup = null;
-            
-            if (hasMoved) {
-                localStorage.setItem('vc_badge_left', badge.style.left);
-                localStorage.setItem('vc_badge_top', badge.style.top);
-            }
-        };
+        document.onmouseup = () => { isDragging = false; document.onmousemove = null; };
     };
-
-    badge.onmouseover = () => badge.style.backgroundColor = 'rgba(14, 99, 156, 0.9)';
-    badge.onmouseout = () => badge.style.backgroundColor = 'rgba(30, 30, 30, 0.85)';
-
-    badge.querySelector('#vibe-tab-name').onclick = (e) => {
-        if (hasMoved) return; 
-        e.stopPropagation();
-        const newName = prompt('Введите имя для этой вкладки VibeCoder:', myTabName);
-        if (newName && newName.trim() !== '') {
-            myTabName = newName.trim();
-            localStorage.setItem(`vc_name_${myTabId}`, myTabName);
-            document.getElementById('vibe-tab-name').textContent = myTabName;
-        }
-    };
-    
     document.body.appendChild(badge);
 }
-
 createVibeBadge();
 setTimeout(createVibeBadge, 1500);
 
-function updatePanelUI(isPaused, serverDown = false) {
+function updatePanelUI() {
     const statusSpan = document.getElementById('vibe-status');
-    const badge = document.getElementById('vibe-coder-badge');
-    if (!statusSpan || !badge) return;
-
-    badge.style.border = '1px solid #569cd6';
-
-    if (serverDown) {
-        statusSpan.innerHTML = '🔴 ОФФЛАЙН';
-        statusSpan.style.background = '#ff4444'; statusSpan.style.color = 'white';
-        return;
-    }
+    if (!statusSpan) return;
     if (isLimitReached && !window.ignoreLimitsSession) {
-        badge.style.border = '2px solid #ff4444';
-        statusSpan.innerHTML = '🛑 ЛИМИТЫ';
-        statusSpan.style.background = '#ff4444'; statusSpan.style.color = 'white';
-        return;
+        statusSpan.innerText = '🛑 ЛИМИТЫ'; statusSpan.style.background = '#ff4444'; return;
     }
-    if (isPaused) {
-        statusSpan.innerHTML = '⏸ ПАУЗА';
-        statusSpan.style.background = '#ffaa00'; statusSpan.style.color = 'black';
+    if (lastServerState === "RUNNING") {
+        statusSpan.innerText = '⚡ ГЕНЕРАЦИЯ'; statusSpan.style.background = '#bb86fc';
     } else {
-        if (lastServerState === "RUNNING") {
-            statusSpan.innerHTML = '⚡ ГЕНЕРАЦИЯ';
-            statusSpan.style.background = '#bb86fc'; statusSpan.style.color = 'black';
-        } else {
-            statusSpan.innerHTML = '🟢 ГОТОВ';
-            statusSpan.style.background = '#31a24c'; statusSpan.style.color = 'white';
-        }
+        statusSpan.innerText = '🟢 ГОТОВ'; statusSpan.style.background = '#31a24c';
     }
 }
 
-// ==========================================
-
-const SERVER_URL = "http://localhost:5070";
-let isProcessing = false;
-let lastProcessedText = "";
-let currentCandidateText = "";
-let stableCount = 0;
-let lastServerState = "STOPPED";
-let isSystemPaused = false;
-let activeTaskId = null;
-let isLimitReached = false;
-
+// ==========================================================
+// 2. СЕТЬ И УМНЫЙ PRO-РЕЖИМ (ANTI-THINKING SELECTOR)
+// ==========================================================
 async function fetchGetProxy(url) {
     return new Promise((resolve, reject) => {
         chrome.runtime.sendMessage({action: "proxy_get", url: url}, (response) => {
-            if (chrome.runtime.lastError) return reject("Runtime Error: " + chrome.runtime.lastError.message);
-            if (response && response.success) resolve(response.data);
-            else reject(response ? response.error : "Background script no response");
+            if (response && response.success) resolve(response.data); else reject("Error");
         });
     });
 }
@@ -165,15 +101,13 @@ async function fetchGetProxy(url) {
 async function fetchPostProxy(url, bodyText) {
     return new Promise((resolve, reject) => {
         chrome.runtime.sendMessage({action: "proxy_post", url: url, body: bodyText}, (response) => {
-            if (chrome.runtime.lastError) return reject("Runtime Error: " + chrome.runtime.lastError.message);
-            if (response && response.success) resolve(response.data);
-            else reject(response ? response.error : "Background POST failed");
+            if (response && response.success) resolve(response.data); else reject("Error");
         });
     });
 }
 
 function resetChat() {
-    const newChatBtn = document.querySelector('a[data-test-id="new-chat-button"], a[href^="/app"], button[aria-label*="New chat"], button[aria-label*="Новый чат"]');
+    const newChatBtn = document.querySelector('a[data-test-id="new-chat-button"], a[href^="/app"], button[aria-label*="New chat" i], button[aria-label*="Новый чат" i]');
     if (newChatBtn) newChatBtn.click();
     else window.location.href = "https://gemini.google.com/app";
 }
@@ -182,258 +116,197 @@ async function triggerLimitReached(reason) {
     if (isLimitReached) return;
     console.warn(`VibeCoder: Сработал триггер лимитов. Причина: ${reason}`);
     isLimitReached = true;
-    updatePanelUI(isSystemPaused, false);
-    try { 
-        await fetchPostProxy(`${SERVER_URL}/limit_reached`, JSON.stringify({source_id: myTabId})); 
-    } catch (e) {}
+    updatePanelUI();
+    try { await fetchPostProxy(`${SERVER_URL}/limit_reached`, JSON.stringify({source_id: myTabId})); } catch (e) {}
 }
 
 async function checkGeminiAlerts() {
     if (window.ignoreLimitsSession) return false;
-
     const bodyText = (document.body.innerText || "").toLowerCase();
-    if (bodyText.includes("you've reached your pro model limit") || 
-        bodyText.includes("limit resets on") ||
-        bodyText.includes("лимит запросов исчерпан")) {
-        await triggerLimitReached("Обнаружен текст о лимитах на странице");
-        return true;
+    if (bodyText.includes("you've reached your pro model limit") || bodyText.includes("limit resets on") || bodyText.includes("лимит запросов исчерпан")) {
+        await triggerLimitReached("Обнаружен текст о лимитах на странице"); return true;
     }
-
     const alerts = document.querySelectorAll('snack-bar, .error-message, [role="alert"], .limit-message');
     for (let el of alerts) {
         const t = (el.innerText || "").toLowerCase();
         if (t.includes("limit") || t.includes("лимит") || t.includes("upgrade")) {
-            await triggerLimitReached(t); 
-            return true;
+            await triggerLimitReached(t); return true;
         }
     }
     return false;
 }
 
 async function ensureProMode() {
-    if (window.ignoreLimitsSession) {
-        console.log("VibeCoder: Игнорируем проверку Pro-режима по выбору пользователя (работаем на Flash).");
-        return true; 
-    }
+    if (window.ignoreLimitsSession) return true; 
 
     console.log("VibeCoder: Проверка активности Pro-режима...");
-    
-    const clickableElements = Array.from(document.querySelectorAll('button, [role="button"], [role="combobox"]'));
-    const modelSelector = clickableElements.find(el => {
-        const text = (el.innerText || el.textContent || "").trim();
-        return (text === 'Fast' || text === 'Flash' || text === 'Pro' || text.includes('Advanced')) && text.length < 20;
-    });
+    const modelSelector = document.querySelector('[data-test-id="bard-mode-menu-button"], button.input-area-switch');
 
     if (!modelSelector) {
-        console.warn("VibeCoder: ⚠️ Переключатель модели не найден на странице!");
+        console.log("VibeCoder: Кнопка переключения моделей не найдена на странице.");
         return true; 
     }
 
-    const currentText = (modelSelector.innerText || modelSelector.textContent || "").trim();
-    console.log(`VibeCoder: Текущая выбранная модель: [${currentText}]`);
+    const currentText = (modelSelector.innerText || modelSelector.textContent || "").toLowerCase().trim();
+    console.log(`VibeCoder: Текущая модель на кнопке: [${currentText}]`);
 
-    if (currentText.includes('Pro') || currentText.includes('Advanced')) {
-        console.log("VibeCoder: Pro-режим уже активен.");
+    // Проверяем, что активна Pro/Advanced, но НЕТ приписки Thinking
+    const isProActive = currentText.includes('pro') || currentText.includes('advanced');
+    const isThinkingActive = currentText.includes('thinking');
+
+    if (isProActive && !isThinkingActive) {
+        console.log("VibeCoder: Pro-режим уже активен и это не Thinking.");
         return true;
     }
 
-    console.log("VibeCoder: Обнаружена базовая модель. Пытаюсь переключить на Pro...");
+    console.log("VibeCoder: Включена не та модель. Открываю меню выбора...");
     modelSelector.click();
     await new Promise(r => setTimeout(r, 800)); 
 
-    const menuItems = Array.from(document.querySelectorAll('menu-item, [role="menuitem"], [role="option"], [role="menuitemradio"], li'));
+    const overlay = document.querySelector('.cdk-overlay-container') || document.body;
+    const menuItems = Array.from(overlay.querySelectorAll('[role="menuitem"], [role="option"], [role="menuitemradio"], button.mat-mdc-menu-item'));
+
+    // Ищем модель, где есть Pro/Advanced, но строго НЕТ слова Thinking
     const proItem = menuItems.find(i => {
-        const t = (i.innerText || i.textContent || "").trim();
-        return t.includes('Pro') || t.includes('Advanced');
+        const t = (i.innerText || i.textContent || "").toLowerCase();
+        return (t.includes('pro') || t.includes('advanced')) && !t.includes('thinking');
     });
 
     if (proItem) {
-        const itemText = (proItem.innerText || proItem.textContent || "").trim();
-        if (itemText.includes('Upgrade') || itemText.includes('Обновить')) {
-            console.warn("VibeCoder: Опция Pro заблокирована (требуется подписка/лимит исчерпан).");
-            document.body.click();
-            await triggerLimitReached("Опция Pro требует обновления");
+        const itemText = (proItem.innerText || proItem.textContent || "").toLowerCase();
+        if (itemText.includes('upgrade') || itemText.includes('обновить') || proItem.disabled || proItem.getAttribute('aria-disabled') === 'true') {
+            console.warn("VibeCoder: ⚠️ Опция Pro заблокирована (нужна подписка или исчерпаны лимиты).");
+            document.body.click(); 
+            await triggerLimitReached("Опция Pro заблокирована/требует обновления");
             return false;
         }
         
-        console.log("VibeCoder: Кликаем по опции Pro...");
+        console.log("VibeCoder: Кликаю по опции Pro/Advanced (без Thinking)...");
         proItem.click();
-        await new Promise(r => setTimeout(r, 1000));
+        await new Promise(r => setTimeout(r, 1200)); 
         return true;
     } else {
-        console.error("VibeCoder: ❌ В меню не найдена модель Pro/Advanced. Лимиты исчерпаны?");
+        console.warn("VibeCoder: ❌ В меню не найдена чистая модель Pro/Advanced без Thinking!");
         document.body.click(); 
-        await triggerLimitReached("Модель Pro недоступна в меню");
-        return false;
+        return true; 
     }
 }
 
-function base64ToFile(base64Data, mimeType, filename) {
-    const byteCharacters = atob(base64Data);
+function base64ToFile(b64, mime, filename) {
+    const byteChars = atob(b64);
     const byteArrays = [];
-    for (let offset = 0; offset < byteCharacters.length; offset += 512) {
-        const slice = byteCharacters.slice(offset, offset + 512);
-        const byteNumbers = new Array(slice.length);
-        for (let i = 0; i < slice.length; i++) {
-            byteNumbers[i] = slice.charCodeAt(i);
-        }
-        const byteArray = new Uint8Array(byteNumbers);
-        byteArrays.push(byteArray);
+    for (let i = 0; i < byteChars.length; i += 512) {
+        const slice = byteChars.slice(i, i + 512);
+        const byteNums = new Array(slice.length);
+        for (let j = 0; j < slice.length; j++) byteNums[j] = slice.charCodeAt(j);
+        byteArrays.push(new Uint8Array(byteNums));
     }
-    const blob = new Blob(byteArrays, { type: mimeType });
-    return new File([blob], filename, { type: mimeType });
+    return new File([new Blob(byteArrays, { type: mime })], filename, { type: mime });
 }
 
-function extractGeminiText(element) {
-    let clone = element.cloneNode(true);
+// ==========================================================
+// 3. ПРЯМОЕ ЧТЕНИЕ ТЕКСТА
+// ==========================================================
+function getLastModelText() {
+    const elements = Array.from(document.querySelectorAll('message-content'));
+    const validContents = elements.filter(el => !el.closest('user-query, [data-message-author-role="user"]'));
     
-    let container = document.createElement('div');
-    Object.assign(container.style, {
-        position: 'absolute', left: '-9999px', top: '0', opacity: '0', display: 'block', width: '800px'
-    });
-    container.appendChild(clone);
-    document.body.appendChild(container);
+    if (validContents.length > 0) {
+        const el = validContents[validContents.length - 1];
+        let text = el.innerText || el.textContent;
+        return text ? text.replace(/\u00A0/g, ' ').replace(/\u200B/g, '').trim() : "";
+    }
+    return "";
+}
 
-    // 1. Убираем мусор
-    clone.querySelectorAll('button, .copy-button, [aria-label*="Copy"]').forEach(btn => btn.remove());
-
-    // 2. ЧИНИМ БЛОКИ КОДА
-    let pres = clone.querySelectorAll('pre');
-    pres.forEach(pre => {
-        let code = pre.innerText || pre.textContent;
-        let lang = 'python'; // Язык по умолчанию
-        
-        let wrapper = pre.closest('.code-block, code-block, [class*="code"]');
-        if (wrapper) {
-            let header = wrapper.querySelector('.language-name, .code-block-language');
-            if (header && header.innerText) {
-                lang = header.innerText.trim().split('\n')[0].replace(/[^a-zA-Z0-9+#-]/g, '').toLowerCase();
+function checkIsGenerating() {
+    const stopBtn = document.querySelector('button[aria-label*="stop gen" i], button[aria-label*="останови" i]');
+    if (stopBtn && stopBtn.offsetWidth > 0) return true;
+    
+    const activeResponses = document.querySelectorAll('model-response');
+    if (activeResponses.length > 0) {
+        const lastResponse = activeResponses[activeResponses.length - 1];
+        const spinner = lastResponse.querySelector('mat-progress-spinner, .gmat-mdc-progress-spinner, mat-spinner');
+        if (spinner) {
+            const style = window.getComputedStyle(spinner);
+            if (spinner.offsetWidth > 0 && spinner.offsetHeight > 0 && style.display !== 'none' && style.opacity !== '0' && style.visibility !== 'hidden') { 
+                return true;
             }
         }
-
-        let mdCodeBlock = document.createElement('div');
-        mdCodeBlock.innerText = `\n\n\`\`\`${lang || 'python'}\n${code}\n\`\`\`\n\n`;
-        
-        if (wrapper && wrapper.parentNode) {
-            wrapper.replaceWith(mdCodeBlock);
-        } else if (pre.parentNode) {
-            pre.replaceWith(mdCodeBlock);
-        }
-    });
-
-    // 3. ВОССТАНАВЛИВАЕМ СПИСКИ
-    clone.querySelectorAll('li').forEach(li => {
-        if (li.parentNode && li.parentNode.tagName === 'OL') {
-            let idx = Array.from(li.parentNode.children).indexOf(li) + 1;
-            li.textContent = `${idx}. ${li.textContent}`;
-        } else {
-            li.textContent = `- ${li.textContent}`;
-        }
-    });
-
-    let result = clone.innerText || clone.textContent;
-    document.body.removeChild(container);
-    
-    return result.replace(/\n{3,}/g, '\n\n').trim();
+    }
+    return false;
 }
 
+// ==========================================================
+// 4. ОРКЕСТРАТОР И ИНЪЕКЦИЯ (ГАРАНТИРОВАННАЯ ДОСТАВКА)
+// ==========================================================
 async function checkServer() {
     if (isProcessing) return; 
     try {
-        let taskUrl = `${SERVER_URL}/get_task?target_id=${encodeURIComponent(myTabId)}`;
-        const data = await fetchGetProxy(taskUrl);
+        const data = await fetchGetProxy(`${SERVER_URL}/get_task?target_id=${encodeURIComponent(myTabId)}`);
         
-        if (data.status === "paused") {
-            isSystemPaused = true;
-            updatePanelUI(true, false);
-            return; 
-        } else {
-            if (isSystemPaused && isLimitReached) {
-                console.log("VibeCoder: Пауза снята сервером! Пользователь решил продолжить на Flash.");
-                window.ignoreLimitsSession = true;
-                isLimitReached = false;
-            }
-            isSystemPaused = false;
-        }
-
-        if (!window.ignoreLimitsSession) {
-            if (await checkGeminiAlerts()) return; 
-        }
-
         if (data.status === "success" && data.task) {
-            const task = data.task;
-            activeTaskId = task.id;
+            console.log("VibeCoder: 📥 ПОЛУЧЕНА НОВАЯ ЗАДАЧА!");
+            activeTaskId = data.task.id;
             isProcessing = true;
             lastServerState = "RUNNING";
-            updatePanelUI(false, false);
+            updatePanelUI();
+            currentCandidateText = "";
+            stableCount = 0;
+            await sendToGemini(data.task.prompt, data.task.images);
+            return;
+        }
 
-            if (task.is_relay) {
-                resetChat();
-                await new Promise(r => setTimeout(r, 2000));
+        if (!activeTaskId) {
+            lastServerState = "STOPPED"; updatePanelUI(); return;
+        }
+
+        let currentText = getLastModelText();
+
+        if (window.waitingForNewBubble) {
+            if (currentText !== window.textBeforeSend || (Date.now() - window.waitStartTime > 15000)) {
+                window.waitingForNewBubble = false;
+                stableCount = 0;
+            } else {
+                lastServerState = "RUNNING"; updatePanelUI(); return;
             }
-            
-            lastProcessedText = ""; currentCandidateText = ""; stableCount = 0;
-            await sendToGemini(task.prompt, task.images);
-            return;
         }
 
-        if (isLimitReached) {
-            updatePanelUI(false, false);
-            return;
-        }
-
-        const generatingElements = document.querySelectorAll(['button[aria-label*="Stop generating"]', 'button[aria-label*="Остановить"]', '.gmat-mdc-progress-spinner', 'mat-spinner'].join(', '));
-        let isGenerating = false;
-        for (let el of generatingElements) { if (el.offsetWidth > 0 || el.offsetHeight > 0) { isGenerating = true; break; } }
-        
+        let isGenerating = checkIsGenerating();
         if (isGenerating) { 
-            lastServerState = "RUNNING";
-            updatePanelUI(false, false);
-            stableCount = 0; 
-            return; 
+            stableCount = 0;
+            lastServerState = "RUNNING"; updatePanelUI(); return; 
         }
 
-        const modelResponses = document.querySelectorAll(['message-content', '.model-response-text', '[data-message-author-role="model"]'].join(', '));
-        
-        // --- ИСПРАВЛЕНИЕ: ЖЕСТКАЯ БЛОКИРОВКА ЧТЕНИЯ СТАРЫХ ПУЗЫРЕЙ (RACE CONDITION FIX) ---
-        if (window.expectedMinBubbles !== undefined && modelResponses.length < window.expectedMinBubbles) {
-            console.log(`VibeCoder: Ждем появления нового пузыря ответа... (Ожидаем: ${window.expectedMinBubbles}, Сейчас: ${modelResponses.length})`);
-            lastServerState = "RUNNING";
-            updatePanelUI(false, false);
-            return; // Прерываем функцию, чтобы не прочитать старый текст!
-        }
-        // ----------------------------------------------------------------------------------
+        if (currentText && currentText.trim() !== "") {
+            let diffText = currentText.replace(/Thinking for \d+s/gi, '').trim();
 
-        if (modelResponses.length > 0) {
-            const lastResponse = modelResponses[modelResponses.length - 1];
-            let text = extractGeminiText(lastResponse);
-            
-            if (text && text.trim() !== "") {
-                if (text !== currentCandidateText) { currentCandidateText = text; stableCount = 0; } 
-                else if (text !== lastProcessedText) { stableCount++; }
+            if (diffText !== currentCandidateText) {
+                currentCandidateText = diffText;
+                stableCount = 0;
+            } else {
+                stableCount++;
+            }
 
-                if (stableCount >= 2) {
-                    isProcessing = true;
-                    lastProcessedText = currentCandidateText;
-                    lastServerState = "STOPPED";
-                    updatePanelUI(false, false);
-                    
-                    const payloadString = JSON.stringify({ task_id: activeTaskId, result: currentCandidateText, source_id: myTabId });
-                    try {
-                        await fetchPostProxy(`${SERVER_URL}/post_result`, payloadString);
-                    } catch (err) {} finally {
-                        window.expectedMinBubbles = undefined; // Сбрасываем ожидание после успешной отправки
-                        isProcessing = false; stableCount = 0; activeTaskId = null;
-                    }
+            if (stableCount >= 2 && activeTaskId) {
+                isProcessing = true;
+                lastServerState = "STOPPED"; updatePanelUI();
+                
+                const payloadString = JSON.stringify({ task_id: activeTaskId, result: currentText, source_id: myTabId });
+                try {
+                    await fetchPostProxy(`${SERVER_URL}/post_result`, payloadString);
+                    console.log("VibeCoder: ✅ УСПЕХ! Ответ принят сервером.");
+                } catch (err) {} finally {
+                    isProcessing = false; activeTaskId = null;
                 }
+            } else {
+                lastServerState = "RUNNING"; updatePanelUI();
             }
         } else {
-             lastServerState = "STOPPED";
-             updatePanelUI(false, false);
+            lastServerState = "RUNNING"; updatePanelUI();
         }
     } catch (e) {
-        lastServerState = "STOPPED";
-        updatePanelUI(isSystemPaused, true);
+        lastServerState = "STOPPED"; updatePanelUI();
     }
 }
 
@@ -448,78 +321,101 @@ async function sendToGemini(text, filesPayload = []) {
     
     inputArea.focus();
 
+    // --- ЭТАП 1: ВБРОС И ВИЗУАЛЬНЫЙ HANDSHAKE ФАЙЛОВ ---
     if (filesPayload && filesPayload.length > 0) {
         try {
             const files = filesPayload.map(fileObj => base64ToFile(fileObj.data, fileObj.mime, fileObj.name));
             const dt = new DataTransfer();
             files.forEach(f => dt.items.add(f));
             
-            const fileInput = document.querySelector('input[type="file"]');
-            if (fileInput) {
-                console.log("VibeCoder: Найдена кнопка загрузки. Выполняю React-инъекцию...");
+            const addBtns = document.querySelectorAll('button[aria-label*="upload" i], button[aria-label*="загруз" i], button[aria-label*="attach" i], button[aria-label*="прикреп" i]');
+            if (addBtns.length > 0) { addBtns[0].click(); await new Promise(r => setTimeout(r, 400)); }
+            
+            let fileInputs = document.querySelectorAll('input[type="file"]');
+            if (fileInputs.length > 0) {
                 const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'files').set;
-                nativeSetter.call(fileInput, dt.files);
-                fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+                fileInputs.forEach(fi => { try { nativeSetter.call(fi, dt.files); fi.dispatchEvent(new Event('change', { bubbles: true })); } catch(e) {} });
             } else {
-                console.log("VibeCoder: Использую Drag & Drop инъекцию...");
-                const dropEvent = new DragEvent('drop', {
-                    bubbles: true,
-                    cancelable: true,
-                    dataTransfer: dt
-                });
+                const dropEvent = new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt });
                 inputArea.dispatchEvent(dropEvent);
             }
             
-            console.log("VibeCoder: Файлы отправлены в интерфейс. Жду старта загрузки...");
-            await new Promise(r => setTimeout(r, 1500));
+            // 🛡️ ИНТЕЛЛЕКТУАЛЬНОЕ ОЖИДАНИЕ МОНТИРОВАНИЯ (VISUAL HANDSHAKE)
+            console.log(`VibeCoder: Ожидание полной отрисовки ${filesPayload.length} вложений в DOM...`);
+            const startMountWait = Date.now();
+            let isFullyMounted = false;
             
-            let retries = 0;
-            let isUploading = false;
-            
-            while (retries < 40) { 
-                await new Promise(r => setTimeout(r, 500));
+            while (Date.now() - startMountWait < 12000) {
+                const formContainer = inputArea.closest('form, .input-area, rich-textarea, [role="region"]') || document.body;
                 
-                const spinners = document.querySelectorAll('mat-progress-spinner, .gmat-mdc-progress-spinner, [aria-label="Loading"], .uploader-progress');
+                // Ищем отрендеренные чипы/иконки вложений
+                const renderedChips = formContainer.querySelectorAll('file-attachment-chip, attachment-chip, preview-chip, .file-preview, [data-test-id*="attachment"], [aria-label*="remove file" i], [aria-label*="удалить файл" i]');
                 
-                if (spinners.length > 0) {
-                    isUploading = true;
-                } else if (isUploading && spinners.length === 0) {
-                    console.log("VibeCoder: Загрузка файлов успешно завершена на серверах Google.");
-                    break;
-                } else if (retries > 6 && spinners.length === 0) {
+                // Проверяем текстовое присутствие имен файлов в контейнере
+                let foundNamesCount = 0;
+                const containerText = (formContainer.innerText || "").toLowerCase();
+                filesPayload.forEach(f => {
+                    if (containerText.includes(f.name.toLowerCase())) foundNamesCount++;
+                });
+
+                if (renderedChips.length >= filesPayload.length || foundNamesCount >= filesPayload.length) {
+                    console.log("VibeCoder: ✅ Визуальный Handshake успешен! Вложения зафиксированы интерфейсом.");
+                    isFullyMounted = true;
+                    await new Promise(r => setTimeout(r, 600)); // Короткая пауза для завершения внутренних анимаций React
                     break;
                 }
-                retries++;
+                await new Promise(r => setTimeout(r, 400));
+            }
+            
+            if (!isFullyMounted) {
+                console.warn("VibeCoder: ⚠️ Истекло время ожидания иконок файлов. Переходим к отправке по таймеру.");
             }
         } catch (err) {
-            console.error("VibeCoder: Критическая ошибка при инъекции файлов:", err);
+            console.error("VibeCoder: Ошибка при инъекции файлов:", err);
         }
     }
 
+    // --- ЭТАП 2: ВСТАВКА ТЕКСТА ПРОМПТА ---
     inputArea.focus();
     document.execCommand('insertText', false, text);
     inputArea.dispatchEvent(new Event('input', { bubbles: true }));
     inputArea.dispatchEvent(new Event('change', { bubbles: true }));
     
-    setTimeout(() => {
-        // --- ЗАХВАТ КОЛИЧЕСТВА ПУЗЫРЕЙ ПЕРЕД ОТПРАВКОЙ ---
-        const currentBubbles = document.querySelectorAll(['message-content', '.model-response-text', '[data-message-author-role="model"]'].join(', ')).length;
-        window.expectedMinBubbles = currentBubbles + 1;
-        console.log(`VibeCoder: Зафиксировано ${currentBubbles} старых пузырей. Ожидаем появление ${window.expectedMinBubbles}-го.`);
-        // ------------------------------------------------
+    // --- ЭТАП 3: ОЖИДАНИЕ РАЗБЛОКИРОВКИ И КЛИК ОТПРАВКИ ---
+    window.textBeforeSend = getLastModelText();
+    window.waitingForNewBubble = true;
+    window.waitStartTime = Date.now();
 
+    console.log("VibeCoder: Ожидание активации кнопки 'Отправить'...");
+    const startSendWait = Date.now();
+    let isSentSuccessfully = false;
+
+    while (Date.now() - startSendWait < 8000) {
         const buttons = Array.from(document.querySelectorAll('button'));
         const sendBtn = buttons.find(b => {
             const combined = ((b.getAttribute('aria-label') || '') + " " + (b.innerText || '')).toLowerCase();
-            return (combined.includes('send') || combined.includes('отправить')) && !combined.includes('feedback') && !combined.includes('отзыв');
+            return (combined.includes('send') || combined.includes('отправить')) && !combined.includes('feedback');
         }) || document.querySelector('[data-testid="send-button"], .send-button');
 
-        if (sendBtn && !sendBtn.disabled) {
-            console.log("VibeCoder: Нажатие кнопки Отправить.");
+        // Проверяем, что кнопка существует и не заблокирована
+        if (sendBtn && !sendBtn.disabled && sendBtn.getAttribute('aria-disabled') !== 'true') {
+            console.log("VibeCoder: 🚀 Кнопка активна. Выполняем отправку!");
             sendBtn.click();
+            isSentSuccessfully = true;
+            break;
         }
-        setTimeout(() => { isProcessing = false; stableCount = 0; }, 2000);
-    }, 500);
+        await new Promise(r => setTimeout(r, 300));
+    }
+
+    if (!isSentSuccessfully) {
+        console.warn("VibeCoder: ⚠️ Кнопка отправки не разблокировалась. Принудительный резервный клик.");
+        const fallbackBtn = document.querySelector('[data-testid="send-button"], .send-button, button[aria-label*="send" i], button[aria-label*="отправить" i]');
+        if (fallbackBtn) fallbackBtn.click();
+    }
+
+    // Освобождаем статус обработки с запасом времени
+    setTimeout(() => { isProcessing = false; }, 3500);
 }
 
+// Запуск основного цикла проверки задач
 setInterval(checkServer, 3000);

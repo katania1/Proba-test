@@ -59,6 +59,27 @@ class RagController:
         
         self.scanner_thread = None
 
+    def cleanup(self):
+        """Полная остановка таймеров и потоков перед уничтожением контроллера (Защита от утечек контекста)"""
+        self.poll_timer.stop()
+        self.debounce_timer.stop()
+        
+        if self.scanner_thread and self.scanner_thread.isRunning():
+            self.scanner_thread.quit()
+            self.scanner_thread.wait(1000)
+            
+        if self.indexer_worker and self.indexer_worker.isRunning():
+            self.indexer_worker.stop()
+            self.indexer_worker.wait(1000)
+            
+        # Точечный сброс системного кэша ChromaDB при реальной смене проекта
+        try:
+            import chromadb
+            chromadb.api.client.SharedSystemClient.clear_system_cache()
+            self.mw.log_system("🧹 [ChromaDB] Системный кэш векторов сброшен при очистке контроллера.")
+        except Exception:
+            pass
+
     def get_context_for_prompt(self, user_text):
         if not user_text or len(user_text.strip()) < 10:
             return ""
@@ -153,7 +174,6 @@ class RagController:
             self.indexer_worker.progress_signal.connect(self._on_indexer_progress)
             self.indexer_worker.finished_signal.connect(self._on_indexer_finished)
             self.indexer_worker.error_signal.connect(self._on_indexer_error)
-            # 🚨 ИСПРАВЛЕНИЕ: ПОДКЛЮЧЕН КАНАЛ ЛОГОВ К ЧАТУ
             self.indexer_worker.log_signal.connect(lambda msg, color: self.mw.log_system(msg, color=color))
             self.indexer_worker.start()
 
@@ -166,7 +186,6 @@ class RagController:
         
         self.indexer_worker = IndexerWorker(self.mw.project_path, self.mw.file_manager, silent=True)
         self.indexer_worker.finished_signal.connect(self._on_silent_rag_finished)
-        # 🚨 ИСПРАВЛЕНИЕ: ПОДКЛЮЧЕН КАНАЛ ЛОГОВ К ЧАТУ
         self.indexer_worker.log_signal.connect(lambda msg, color: self.mw.log_system(msg, color=color))
         self.indexer_worker.start()
 

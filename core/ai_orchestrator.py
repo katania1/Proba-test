@@ -21,6 +21,10 @@ class AIOrchestrator:
             "ТЫ ОБЯЗАН ОТВЕТИТЬ СТРОГО В ФОРМАТЕ JSON.\n\n"
             "🚨 КРИТИЧЕСКОЕ ПРАВИЛО JSON: Внутри полей 'search' и 'replace' СТАРАЙСЯ ИСПОЛЬЗОВАТЬ ТОЛЬКО ОДИНАРНЫЕ КАВЫЧКИ ('). "
             "Если используешь двойные кавычки в коде — ОБЯЗАТЕЛЬНО экранируй их (\\\").\n\n"
+            "🚨 ПРАВИЛО ЧТЕНИЯ ФАЙЛОВ: НИКОГДА не используй инструменты вроде `analyze_log` или `run_terminal_command` для чтения исходного кода проекта (.py, .html, .js и т.д.). Для чтения кода ты ОБЯЗАН использовать исключительно массив `request_files` в твоем JSON-ответе.\n\n"
+            "🚨 СИСТЕМНЫЕ ФАЙЛЫ И СТРУКТУРА: Актуальная структура файлов и папок проекта передается тебе в тексте запроса. "
+            "База знаний (RAG) прикрепляется отдельным блоком или файлом 'rag_context.txt'. "
+            "НЕ ЗАПРАШИВАЙ системные файлы или структуру через 'request_files'. Просто используй предоставленный контекст для анализа.\n\n"
             "ФОРМАТ JSON ОТВЕТА:\n"
             "{\n"
             "  \"thoughts\": \"Твои мысли о том, как решить задачу (в Markdown)\",\n"
@@ -52,15 +56,21 @@ class AIOrchestrator:
 
     def parse_and_validate_response(self, raw_text):
         marker = '`' * 3
-        clean_text = raw_text.replace(f'{marker}json', '').replace(marker, '').strip()
         
-        start = clean_text.find('{')
-        end = clean_text.rfind('}')
+        # Находим границы JSON
+        start = raw_text.find('{')
+        end = raw_text.rfind('}')
         
         if start == -1 or end == -1:
             return {"status": "error", "error_message": "Ответ не содержит JSON-объекта. ИИ ответил обычным текстом."}
             
-        json_str = clean_text[start:end+1]
+        json_str = raw_text[start:end+1]
+        
+        # --- ФИКС НЕВИДИМЫХ СИМВОЛОВ GEMINI ---
+        json_str = json_str.replace('\xa0', ' ').replace('\u200b', '')
+        
+        # Извлекаем текст ПОСЛЕ JSON (тот самый "хвост" с описанием структуры)
+        extra_text = raw_text[end+1:].strip()
         
         try:
             data = json.loads(json_str)
@@ -68,6 +78,12 @@ class AIOrchestrator:
             if not isinstance(data, dict):
                 return {"status": "error", "error_message": "Корневой элемент JSON должен быть объектом (dict)."}
             
+            # --- ФИКС ГИБРИДНОГО ОТВЕТА: Склеиваем мысли и лишний текст ---
+            thoughts = data.get("thoughts", "")
+            if extra_text:
+                data["thoughts"] = (thoughts + "\n\n" + extra_text).strip()
+            # ------------------------------------------------------------
+
             if "thoughts" not in data and "updates" not in data and "create_files" not in data:
                 dump = json.dumps(data, ensure_ascii=False, indent=2)
                 data["thoughts"] = f"⚠️ **Внимание: ИИ выдал нестандартный JSON:**\n{marker}json\n{dump}\n{marker}"
@@ -181,5 +197,4 @@ class AIOrchestrator:
 
         html_content = re.sub(r'(<pre[^>]*>)(.*?)(</pre>)', inject_copy_button, html_content, flags=re.DOTALL)
 
-        # ИСПРАВЛЕНИЕ: Удален жесткий font-size, чтобы работал зум чата
         return f"{custom_css}<div style='color: #d4d4d4; font-family: \"Segoe UI\", Arial, sans-serif;'>{html_content}</div>"
