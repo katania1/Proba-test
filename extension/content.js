@@ -1,7 +1,7 @@
 /**
- * 📖 БИБЛИЯ ПРОЕКТА: CONTENT.JS (v4.3 - VISUAL HANDSHAKE & ANTI-THINKING)
- * Интегрирована гарантированная доставка VFS: скрипт дожидается фактической 
- * отрисовки UI-чипов файлов и разблокировки кнопки отправки в чистом чате.
+ * 📖 БИБЛИЯ ПРОЕКТА: CONTENT.JS (v5.0 - CHUNKED INSERTION & ANTI-THINKING)
+ * Интегрирована гарантированная доставка больших объемов кода через 
+ * чанкованную вставку текста (без зависаний вкладки).
  */
 
 let myTabId = sessionStorage.getItem('vc_tab_id');
@@ -32,6 +32,74 @@ setInterval(() => {
         body: JSON.stringify({ tab_id: myTabId, tab_name: myTabName })
     }).catch(() => {}); 
 }, 2000);
+
+// ==========================================================
+// 0. БРОНЕБОЙНАЯ ВСТАВКА ТЕКСТА (ЧАНКАМИ)
+// ==========================================================
+// ==========================================================
+// 0. БРОНЕБОЙНАЯ ВСТАВКА ТЕКСТА (ГИБРИДНАЯ)
+// ==========================================================
+async function insertLargeTextChunked(inputArea, text, chunkSize = 3000) {
+    console.log(`VibeCoder: Начинаем умную вставку текста (${text.length} символов)...`);
+    
+    // Универсальный селектор для повторного поиска элемента
+    const selector = 'rich-textarea > div, div[contenteditable="true"][role="textbox"], textarea#prompt-textarea';
+    
+    let currentInput = document.querySelector(selector) || inputArea;
+    currentInput.focus();
+    
+    // Очищаем поле
+    document.execCommand('selectAll', false, null);
+    document.execCommand('delete', false, null);
+    
+    // ПОПЫТКА 1: Нативный Paste (Идеально для Gemini, не вешает браузер)
+    const dt = new DataTransfer();
+    dt.setData('text/plain', text);
+    const pasteEvent = new ClipboardEvent('paste', { 
+        clipboardData: dt, bubbles: true, cancelable: true 
+    });
+    currentInput.dispatchEvent(pasteEvent);
+    
+    await new Promise(r => setTimeout(r, 150)); // Ждем реакции React
+    
+    // Проверяем, сработал ли Paste (вставилось ли хотя бы 50% текста)
+    if (currentInput.innerText.length < text.length * 0.5) {
+        console.log("VibeCoder: Нативный Paste заблокирован. Запускаем бронебойный чанкинг...");
+        
+        // Очищаем еще раз перед чанками
+        document.execCommand('selectAll', false, null);
+        document.execCommand('delete', false, null);
+        
+        for (let i = 0; i < text.length; i += chunkSize) {
+            // КРИТИЧЕСКИЙ ФИКС: Ищем инпут ЗАНОВО каждый цикл, если React его перерисовал
+            currentInput = document.querySelector(selector) || currentInput;
+            currentInput.focus();
+            
+            // Принудительно ставим курсор в самый конец
+            const selection = window.getSelection();
+            selection.selectAllChildren(currentInput);
+            selection.collapseToEnd();
+            
+            // Вставляем кусок
+            const chunk = text.slice(i, i + chunkSize);
+            document.execCommand('insertText', false, chunk);
+            
+            // Говорим React, что текст изменился
+            currentInput.dispatchEvent(new Event('input', { bubbles: true }));
+            
+            await new Promise(r => setTimeout(r, 20));
+        }
+    }
+    
+    // Финальная синхронизация состояний
+    currentInput = document.querySelector(selector) || currentInput;
+    currentInput.dispatchEvent(new Event('input', { bubbles: true }));
+    currentInput.dispatchEvent(new Event('change', { bubbles: true }));
+    currentInput.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
+    
+    console.log("VibeCoder: Текст успешно вставлен полностью!");
+    await new Promise(r => setTimeout(r, 400)); // Пауза перед кликом "Отправить"
+}
 
 // ==========================================================
 // 1. ПЛАШКА UI (Draggable Badge)
@@ -150,7 +218,6 @@ async function ensureProMode() {
     const currentText = (modelSelector.innerText || modelSelector.textContent || "").toLowerCase().trim();
     console.log(`VibeCoder: Текущая модель на кнопке: [${currentText}]`);
 
-    // Проверяем, что активна Pro/Advanced, но НЕТ приписки Thinking
     const isProActive = currentText.includes('pro') || currentText.includes('advanced');
     const isThinkingActive = currentText.includes('thinking');
 
@@ -166,7 +233,6 @@ async function ensureProMode() {
     const overlay = document.querySelector('.cdk-overlay-container') || document.body;
     const menuItems = Array.from(overlay.querySelectorAll('[role="menuitem"], [role="option"], [role="menuitemradio"], button.mat-mdc-menu-item'));
 
-    // Ищем модель, где есть Pro/Advanced, но строго НЕТ слова Thinking
     const proItem = menuItems.find(i => {
         const t = (i.innerText || i.textContent || "").toLowerCase();
         return (t.includes('pro') || t.includes('advanced')) && !t.includes('thinking');
@@ -319,9 +385,7 @@ async function sendToGemini(text, filesPayload = []) {
     const inputArea = document.querySelector('rich-textarea > div, div[contenteditable="true"][role="textbox"], textarea#prompt-textarea');
     if (!inputArea) { isProcessing = false; return; }
     
-    inputArea.focus();
-
-    // --- ЭТАП 1: ВБРОС И ВИЗУАЛЬНЫЙ HANDSHAKE ФАЙЛОВ ---
+    // --- ЭТАП 1: ВБРОС И ВИЗУАЛЬНЫЙ HANDSHAKE КАРТИНОК/ФАЙЛОВ ---
     if (filesPayload && filesPayload.length > 0) {
         try {
             const files = filesPayload.map(fileObj => base64ToFile(fileObj.data, fileObj.mime, fileObj.name));
@@ -340,46 +404,47 @@ async function sendToGemini(text, filesPayload = []) {
                 inputArea.dispatchEvent(dropEvent);
             }
             
-            // 🛡️ ИНТЕЛЛЕКТУАЛЬНОЕ ОЖИДАНИЕ МОНТИРОВАНИЯ (VISUAL HANDSHAKE)
-            console.log(`VibeCoder: Ожидание полной отрисовки ${filesPayload.length} вложений в DOM...`);
+            // Интеллектуальное ожидание монтирования и спиннеров
+            console.log(`VibeCoder: Ожидание полной отрисовки и загрузки ${filesPayload.length} вложений...`);
             const startMountWait = Date.now();
             let isFullyMounted = false;
             
-            while (Date.now() - startMountWait < 12000) {
+            while (Date.now() - startMountWait < 15000) {
                 const formContainer = inputArea.closest('form, .input-area, rich-textarea, [role="region"]') || document.body;
+                const renderedChips = formContainer.querySelectorAll('file-attachment-chip, attachment-chip, preview-chip, .file-preview, [data-test-id*="attachment"]');
                 
-                // Ищем отрендеренные чипы/иконки вложений
-                const renderedChips = formContainer.querySelectorAll('file-attachment-chip, attachment-chip, preview-chip, .file-preview, [data-test-id*="attachment"], [aria-label*="remove file" i], [aria-label*="удалить файл" i]');
-                
-                // Проверяем текстовое присутствие имен файлов в контейнере
-                let foundNamesCount = 0;
-                const containerText = (formContainer.innerText || "").toLowerCase();
-                filesPayload.forEach(f => {
-                    if (containerText.includes(f.name.toLowerCase())) foundNamesCount++;
-                });
-
-                if (renderedChips.length >= filesPayload.length || foundNamesCount >= filesPayload.length) {
-                    console.log("VibeCoder: ✅ Визуальный Handshake успешен! Вложения зафиксированы интерфейсом.");
-                    isFullyMounted = true;
-                    await new Promise(r => setTimeout(r, 600)); // Короткая пауза для завершения внутренних анимаций React
-                    break;
+                if (renderedChips.length >= filesPayload.length) {
+                    const spinners = formContainer.querySelectorAll('mat-progress-spinner, .gmat-mdc-progress-spinner, [role="progressbar"]');
+                    let hasActiveUpload = false;
+                    
+                    spinners.forEach(s => {
+                        if (s.offsetWidth > 0 && window.getComputedStyle(s).display !== 'none') {
+                            hasActiveUpload = true;
+                        }
+                    });
+                    
+                    if (!hasActiveUpload) {
+                        console.log("VibeCoder: ✅ Файлы успешно загружены на сервер Google (спиннеры исчезли).");
+                        isFullyMounted = true;
+                        await new Promise(r => setTimeout(r, 1000));
+                        break;
+                    } else {
+                        console.log("VibeCoder: ⏳ Ждем окончания загрузки файлов на сервер...");
+                    }
                 }
                 await new Promise(r => setTimeout(r, 400));
             }
             
             if (!isFullyMounted) {
-                console.warn("VibeCoder: ⚠️ Истекло время ожидания иконок файлов. Переходим к отправке по таймеру.");
+                console.warn("VibeCoder: ⚠️ Истекло время ожидания загрузки файлов на сервер.");
             }
         } catch (err) {
             console.error("VibeCoder: Ошибка при инъекции файлов:", err);
         }
     }
 
-    // --- ЭТАП 2: ВСТАВКА ТЕКСТА ПРОМПТА ---
-    inputArea.focus();
-    document.execCommand('insertText', false, text);
-    inputArea.dispatchEvent(new Event('input', { bubbles: true }));
-    inputArea.dispatchEvent(new Event('change', { bubbles: true }));
+    // --- ЭТАП 2: ЧАНКОВАННАЯ ВСТАВКА ТЕКСТА ПРОМПТА ---
+    await insertLargeTextChunked(inputArea, text);
     
     // --- ЭТАП 3: ОЖИДАНИЕ РАЗБЛОКИРОВКИ И КЛИК ОТПРАВКИ ---
     window.textBeforeSend = getLastModelText();
@@ -397,7 +462,6 @@ async function sendToGemini(text, filesPayload = []) {
             return (combined.includes('send') || combined.includes('отправить')) && !combined.includes('feedback');
         }) || document.querySelector('[data-testid="send-button"], .send-button');
 
-        // Проверяем, что кнопка существует и не заблокирована
         if (sendBtn && !sendBtn.disabled && sendBtn.getAttribute('aria-disabled') !== 'true') {
             console.log("VibeCoder: 🚀 Кнопка активна. Выполняем отправку!");
             sendBtn.click();

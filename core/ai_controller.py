@@ -326,38 +326,39 @@ class AIController(QObject):
         is_browser = engine_data.get("provider_id", "Browser") == "Browser"
 
         self.mw.chat_logger.log("SYSTEM", f"Авто-отправка файлов: {', '.join(file_paths)}")
-        self.mw.chat_history.append(f"<br><div style='color: #858585; font-size: 13px; margin-left: 10px;'>[СИСТЕМА] Автоматически отправлены: {', '.join(file_paths)}</div>")
+        self.mw.chat_history.append(f"<br><div style='color: #858585; font-size: 13px; margin-left: 10px;'>[СИСТЕМА] Автоматически отправлен код: {', '.join(file_paths)}</div>")
         self.mw.scroll_chat()
 
+        # Собираем код файлов в явные текстовые блоки
+        marker = '`' * 3
+        attached_blocks = []
+        for path in file_paths:
+            content = self.mw.get_file_content_safe(path)
+            if content: 
+                attached_blocks.append(f"### ФАЙЛ: {path} ###\n{marker}python\n{content}\n{marker}")
+            else:
+                attached_blocks.append(f"### ФАЙЛ: {path} ###\n[ФАЙЛ НЕ НАЙДЕН ИЛИ ПУСТ]")
+
+        # Формируем жесткий текстовый промпт со вшитым кодом
+        system_text = (
+            "[СИСТЕМНОЕ СООБЩЕНИЕ: ПОЛЬЗОВАТЕЛЬ ПРЕДОСТАВИЛ ЗАПРОШЕННЫЕ ФАЙЛЫ]\n"
+            "Ниже представлен исходный код запрошенных файлов.\n"
+            "Проанализируй его и выполни предыдущую задачу на поиск и замену (Smart Diff).\n"
+            "Отвечай СТРОГО в формате JSON Оркестратора.\n\n"
+        ) + "\n\n".join(attached_blocks)
+
+        self.mw.last_full_prompt = system_text
+
         if is_browser:
-            image_payload = []
-            for path in file_paths:
-                content = self.mw.get_file_content_safe(path)
-                if content:
-                    b64_data = base64.b64encode(content.encode('utf-8')).decode('utf-8')
-                    image_payload.append({"mime": "text/plain", "data": b64_data, "name": os.path.basename(path)})
-
-            system_text = "[СИСТЕМНОЕ СООБЩЕНИЕ]\nПользователь предоставил запрошенные файлы. Они прикреплены к этому сообщению.\nПроанализируй их и выполни предыдущую задачу. Не забывай отвечать в формате JSON Оркестратора."
-            self.mw.last_full_prompt = system_text
-
             self.mw.tokens_sent += self.estimate_tokens(self.mw.last_full_prompt)
             self.mw.update_status_bar()
             self.retry_count = 0
 
-            self.bridge.add_task(self.mw.last_full_prompt, target_id=self.mw.get_current_target_id(), images=image_payload)
-            self.mw.log_system("Файлы отправлены как вложения. Ожидание ответа...")
+            # КРИТИЧЕСКИ ВАЖНО: Отправляем задачу как обычный текст (images=[]), 
+            # content.js вставит этот гигантский текст чанками без зависаний!
+            self.bridge.add_task(self.mw.last_full_prompt, target_id=self.mw.get_current_target_id(), images=[])
+            self.mw.log_system("Текст файлов отправлен в чат (чанкованная вставка). Ожидание ответа...")
         else:
-            marker = '`' * 3
-            attached_blocks = []
-            for path in file_paths:
-                content = self.mw.get_file_content_safe(path)
-                if content: 
-                    attached_blocks.append(f"### ФАЙЛ: {path} ###\n{marker}\n{content}\n{marker}")
-                else:
-                    attached_blocks.append(f"### ФАЙЛ: {path} ###\n[ФАЙЛ НЕ НАЙДЕН ИЛИ ПУСТ]")
-            
-            system_text = "[СИСТЕМНОЕ СООБЩЕНИЕ: ПОЛЬЗОВАТЕЛЬ ПРЕДОСТАВИЛ ЗАПРОШЕННЫЕ ФАЙЛЫ]\n\n" + "\n\n".join(attached_blocks) + "\n\nПроанализируй их и выполни предыдущую задачу."
-            
             self.mw.last_full_prompt = self.orchestrator.format_request(user_prompt=system_text, project_path=self.mw.project_path, current_file_path=self.mw.current_file_path, file_content="")
             self.mw.tokens_sent += self.estimate_tokens(self.mw.last_full_prompt)
             self.mw.update_status_bar()

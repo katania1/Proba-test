@@ -14,16 +14,32 @@ class ContextBuilder:
             return base64.b64encode(f.read()).decode('utf-8')
 
     def _get_project_tree(self):
-        """Собирает физическую структуру проекта с защитой от переполнения памяти Chrome API"""
+        """Собирает физическую структуру проекта с защитой от переполнения памяти Chrome API и учетом .gitignore"""
         tree = ["=== СТРУКТУРА ФАЙЛОВ ПРОЕКТА ==="]
         file_count = 0
         MAX_FILES = 800  # Жесткий лимит файлов для защиты канала связи браузера
         
-        # Расширенный список мусорных папок
-        ignore_dirs = {
-            'venv', 'env', '__pycache__', 'node_modules', 'build', 
-            'dist', 'out', 'target', 'bin', 'obj', 'coverage'
-        }
+        # 1. Читаем пользовательские правила из .gitignore и .vibeignore
+        custom_ignores = set()
+        for ignore_file in ['.gitignore', '.vibeignore']:
+            ignore_path = os.path.join(self.mw.project_path, ignore_file)
+            if os.path.exists(ignore_path):
+                try:
+                    with open(ignore_path, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            line = line.strip()
+                            if line and not line.startswith('#'):
+                                # Берем чистые имена (без слешей), чтобы легко фильтровать папки
+                                clean_name = line.strip('/\\')
+                                custom_ignores.add(clean_name)
+                except Exception as e:
+                    self.mw.log_system(f"⚠️ Ошибка чтения {ignore_file}: {e}", color="#ffaa00")
+
+        # 2. Системные папки, которые 100% не нужны ИИ (предохранитель)
+        system_ignore_dirs = {'venv', 'env', '__pycache__', 'node_modules', '.git', '.vibecoder', 'build', 'dist'}
+        
+        # Объединяем списки для папок
+        all_ignore_dirs = system_ignore_dirs.union(custom_ignores)
         
         # Список бинарников и медиа, которые не нужны ИИ
         ignore_exts = (
@@ -36,8 +52,8 @@ class ContextBuilder:
                 if file_count >= MAX_FILES:
                     break
                     
-                # Игнорируем скрытые папки (начинаются с точки: .git, .env, .venv, .idea) и системные
-                dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ignore_dirs]
+                # Фильтруем папки НА ЛЕТУ: Игнорируем скрытые (с точкой) и все из .gitignore
+                dirs[:] = [d for d in dirs if not d.startswith('.') and d not in all_ignore_dirs]
                 
                 level = root.replace(self.mw.project_path, '').count(os.sep)
                 indent = ' ' * 4 * level
@@ -54,7 +70,8 @@ class ContextBuilder:
                         tree.append(f"{subindent}... [Слишком много файлов, дерево обрезано для защиты памяти] ...")
                         break
                         
-                    if not f.endswith(ignore_exts):
+                    # Фильтруем файлы по расширению и по правилам .gitignore
+                    if not f.endswith(ignore_exts) and f not in custom_ignores:
                         tree.append(f"{subindent}📄 {f}")
                         file_count += 1
                         
