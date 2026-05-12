@@ -113,17 +113,18 @@ class ContextBuilder:
                         b64_content = base64.b64encode(content.encode('utf-8')).decode('utf-8')
                         image_payload.append({"mime": "text/plain", "data": b64_content, "name": os.path.basename(fname)})
 
-        # 4. MCP Инструменты
+        # 4. MCP Инструменты (ГЕНЕРИРУЕМ СТРОГО ДЛЯ РЕЖИМА КОДИНГА)
         tools_instruction = ""
-        tools_schema = self.ctrl.mcp_manager.get_tools_schema()
-        if tools_schema:
-            tools_instruction = (
-                "--- ДОСТУПНЫЕ ИНСТРУМЕНТЫ (MCP) ---\n"
-                "У тебя есть доступ к внешним инструментам (Context7, Поиск, БД).\n"
-                "АБСОЛЮТНЫЙ ПРИОРИТЕТ: Если тебе нужно вызвать инструмент, ВЕРНИ ТОЛЬКО ОДИН JSON в формате:\n"
-                '{"tool": "имя_инструмента", "args": {"ключ": "значение"}}\n'
-                "Список инструментов:\n" + json.dumps(tools_schema, ensure_ascii=False, indent=2) + "\n\n"
-            )
+        if is_coding_mode:
+            tools_schema = self.ctrl.mcp_manager.get_tools_schema()
+            if tools_schema:
+                tools_instruction = (
+                    "--- ДОСТУПНЫЕ ИНСТРУМЕНТЫ (MCP) ---\n"
+                    "У тебя есть доступ к внешним инструментам (Context7, Поиск, БД).\n"
+                    "АБСОЛЮТНЫЙ ПРИОРИТЕТ: Если тебе нужно вызвать инструмент, ВЕРНИ ТОЛЬКО ОДИН JSON в формате:\n"
+                    '{"tool": "имя_инструмента", "args": {"ключ": "значение"}}\n'
+                    "Список инструментов:\n" + json.dumps(tools_schema, ensure_ascii=False, indent=2) + "\n\n"
+                )
 
         api_sys_prompt = ""
         final_prompt_text = ""
@@ -143,10 +144,6 @@ class ContextBuilder:
                     b64_rag = base64.b64encode(rag_context_str.encode('utf-8')).decode('utf-8')
                     image_payload.append({"mime": "text/plain", "data": b64_rag, "name": "rag_context.txt"})
 
-                # --- ГИБРИДНЫЙ ПОДХОД (РЕШЕНИЕ ПРОБЛЕМЫ ПЕСОЧНИЦЫ) ---
-                # Мы больше не создаем файл project_state.txt как вложение, чтобы ИИ не пытался 
-                # читать его через консольные команды (cat/type), которые завершаются ошибкой.
-                # Вместо этого легкое стерильное дерево файлов передается прямо в тексте.
                 status_block = "\n\n=== ТЕКУЩИЙ СТАТУС ПРОЕКТА ===\n"
                 status_block += f"Путь проекта: {self.mw.project_path}\n"
                 if self.mw.current_file_path:
@@ -164,7 +161,8 @@ class ContextBuilder:
                     "\n\n[СИСТЕМНОЕ НАПОМИНАНИЕ: Актуальная структура файлов и папок проекта представлена выше в тексте. База знаний (RAG) прикреплена в виде файла rag_context.txt. Отвечай СТРОГО в формате JSON Оркестратора.]"
                 )
             else:
-                chat_rules = tools_instruction + "Ты — умный AI-помощник разработчика. Отвечай на вопросы пользователя в свободном формате (Markdown). Пиши понятно, приводи примеры кода, если нужно. НИКАКИХ JSON-структур."
+                # ИНТЕГРАЦИЯ: В режиме чата ИИ получает абсолютно чистый и легкий промпт без MCP
+                chat_rules = "Ты — умный AI-помощник разработчика. Отвечай на вопросы пользователя в свободном формате (Markdown). Пиши понятно, приводи примеры кода, если нужно. НИКАКИХ JSON-структур."
                 final_prompt_text = chat_rules + "\n\n=== ВОПРОС ПОЛЬЗОВАТЕЛЯ ===\n" + enriched_user_text + "\n\n[СИСТЕМНОЕ НАПОМИНАНИЕ: Мы находимся в режиме 'Чат'. Отвечай обычным текстом (Markdown), JSON-структура НЕ нужна.]"
 
         # ==================================
@@ -172,7 +170,7 @@ class ContextBuilder:
         # ==================================
         else:
             enriched_text = user_text
-            if tools_schema:
+            if tools_instruction:
                 enriched_text = tools_instruction + "\n\n" + enriched_text
             
             if rag_context_str:

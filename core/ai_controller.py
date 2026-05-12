@@ -17,7 +17,7 @@ from core.context_builder import ContextBuilder
 class AIController(QObject):
     ai_response_signal = pyqtSignal(str)
     limit_reached_signal = pyqtSignal()
-    bridge_log_signal = pyqtSignal(str, str) # КРИТИЧЕСКИЙ ФИКС: Сигнал для логов (сообщение, цвет)
+    bridge_log_signal = pyqtSignal(str, str)
 
     def __init__(self, main_window):
         super().__init__()
@@ -28,16 +28,13 @@ class AIController(QObject):
         self.mcp_manager = MCPManager(self.mw.project_path)
         self.context_builder = ContextBuilder(self) 
         
-        # Привязка коллбэков моста к потокобезопасным сигналам Qt
         self.bridge.on_result_received = lambda text: self.ai_response_signal.emit(text)
         self.bridge.on_limit_reached = lambda: self.limit_reached_signal.emit()
         self.bridge.on_log_received = lambda msg, color="": self.bridge_log_signal.emit(msg, color)
         
-        # --- ФИКС: СВЯЗЫВАЕМ СИГНАЛЫ С ФУНКЦИЯМИ ОБРАБОТКИ ---
         self.ai_response_signal.connect(self.process_ai_response)
         self.limit_reached_signal.connect(self.process_limit_reached)
         self.bridge_log_signal.connect(self.process_bridge_log)
-        # ---------------------------------------------------
         
         self.retry_count = 0
         self.is_waiting_for_commit_msg = False
@@ -46,24 +43,16 @@ class AIController(QObject):
         self.browser_mcp_step = 0
         self.max_browser_mcp_steps = 5
         self.agent_trace = []
-        self.current_trace_id = None # ID текущей сессии для привязки к БД логов
+        self.current_trace_id = None 
         
-        # --- ПАМЯТЬ ДЛЯ ДЕТЕКТОРА "ДНЯ СУРКА" ---
         self.auto_heal_attempts = 0
         self.last_tool_result_hash = None
         self.last_tool_name = None
 
-    # =========================================================
-    # ОБРАБОТКА ЛОГОВ ТЕЛЕМЕТРИИ
-    # =========================================================
     def process_bridge_log(self, msg, color):
-        """Безопасно выводит лог из фонового потока Flask в GUI"""
         real_color = color if color else None
         self.mw.log_system(msg, color=real_color)
 
-    # =========================================================
-    # ДОЛГОСРОЧНАЯ ПАМЯТЬ ИНСПЕКТОРА (TTL 7 ДНЕЙ)
-    # =========================================================
     def _save_current_trace(self):
         if not self.agent_trace or not self.current_trace_id:
             return
@@ -79,10 +68,8 @@ class AIController(QObject):
             except Exception:
                 pass
         
-        # Убираем текущий трейс, если он уже есть (для динамической перезаписи шагов)
         traces = [t for t in traces if t.get("id") != self.current_trace_id]
         
-        # Формируем красивый заголовок из начала промпта
         title_text = self.agent_trace[0].get("content", "")
         if "=== ЗАДАЧА ПОЛЬЗОВАТЕЛЯ ===" in title_text:
             title = title_text.split("=== ЗАДАЧА ПОЛЬЗОВАТЕЛЯ ===")[-1].strip()[:100]
@@ -99,7 +86,6 @@ class AIController(QObject):
         
         traces.append(record)
         
-        # Авто-очистка логов старше 7 дней
         cutoff = datetime.now() - timedelta(days=7)
         valid_traces = []
         for t in traces:
@@ -108,15 +94,13 @@ class AIController(QObject):
                 if t_date > cutoff:
                     valid_traces.append(t)
             except:
-                pass # Пропускаем сломанные даты
+                pass 
                 
         try:
             with open(trace_file, 'w', encoding='utf-8') as f:
                 json.dump(valid_traces, f, ensure_ascii=False, indent=2)
         except Exception as e:
             self.mw.log_system(f"Ошибка сохранения лога инспектора: {e}", color="#ff4444")
-
-    # =========================================================
 
     def start(self):
         self.bridge.start_server()
@@ -125,17 +109,14 @@ class AIController(QObject):
         return int(len(text) / 2.5)
 
     def handle_terminal_error(self, error_text):
-        """Принимает сигнал от терминала и запускает цикл авто-лечения"""
         engine_data = self.mw.get_selected_engine_data()
         is_browser = engine_data.get("provider_id", "Browser") == "Browser"
 
         self.mw.chat_logger.log("SYSTEM", f"Перехват ошибки терминала:\n{error_text}")
         
-        # Генерируем уникальный ID трейса для привязки логов
         self.current_trace_id = str(uuid.uuid4())[:12]
         safe_error = error_text.replace('<', '&lt;').replace('>', '&gt;').replace('\n', '<br>')
         
-        # Оборачиваем заголовок в невидимую ссылку trace://
         ui_alert = (
             f"<div style='border: 1px solid #d32f2f; background-color: #3b1b1b; padding: 10px; border-radius: 5px; margin: 10px 0;'>"
             f"<a href='trace://{self.current_trace_id}' style='text-decoration: none;'><b style='color: #ff4444;'>🚨 [АВТО-ОТЛАДКА] Перехвачена ошибка из системного терминала:</b></a><br><br>"
@@ -213,7 +194,6 @@ class AIController(QObject):
         media_notice = f" <i>(+ {len(payload['image_paths'])} картинки)</i>" if payload['image_paths'] else ""
         mode_notice = "⚡ Кодинг" if is_coding_mode else "💬 Чат"
         
-        # Оборачиваем "ВЫ" в невидимую ссылку trace://
         self.mw.chat_history.append(f"<br><span style='color: #569cd6;'><a href='trace://{self.current_trace_id}' style='color: #569cd6; text-decoration: none;'><b>ВЫ</b></a> [{mode_notice}] (в <i>{tab_display_name}</i>){media_notice}<b>:</b> {user_text}</span>")
         self.mw.scroll_chat()
         
@@ -381,7 +361,7 @@ class AIController(QObject):
         self.mw.log_system("🚨 Внимание: Получен сигнал об изменении лимитов Gemini!", color="#ffaa00", is_bold=True)
         msg = QMessageBox(self.mw)
         msg.setWindowTitle("⚠️ Лимиты Gemini Pro")
-        msg.setText("Похоже, лимиты продвинутой версии (Pro) исчерпаны, и чат перешел на быструю версию (Flash).\n\nЧто делаем дальше?")
+        msg.setText("Похоже, лимиты продвинутой версии (Pro) исчерпаны, и чат перешел на быструю version (Flash).\n\nЧто делаем дальше?")
         
         btn_relay = msg.addButton("🔄 Собрать Эстафету", QMessageBox.ButtonRole.AcceptRole)
         btn_continue = msg.addButton("⚡ Продолжить на Flash", QMessageBox.ButtonRole.RejectRole)
@@ -482,7 +462,6 @@ class AIController(QObject):
                 
             tool_result = self.mcp_manager.execute_tool(tool_name, args)
             
-            # --- ИНТЕГРАЦИЯ: ДЕТЕКТОР "ДНЯ СУРКА" (ANTI-LOOP SYSTEM) ---
             current_hash = hashlib.md5(tool_result.encode('utf-8')).hexdigest()
             warning_block = ""
             
@@ -502,7 +481,6 @@ class AIController(QObject):
                 
             self.last_tool_name = tool_name
             self.last_tool_result_hash = current_hash
-            # -----------------------------------------------------------
 
             next_prompt = f"Результат выполнения '{tool_name}':\n---\n{tool_result}\n---{warning_block}\n\nЕсли информации достаточно, дай финальный ответ. Иначе - вызови следующий инструмент."
             
@@ -535,12 +513,25 @@ class AIController(QObject):
             self.mw.log_system(f"ОШИБКА ИИ: {result['error_message']}", color="#ff4444", is_bold=True)
             self.mw.log_system(f"Авто-исправление (Попытка {self.retry_count} из 2)...", color="#ffaa00")
             
+            # --- ИНТЕГРАЦИЯ: ДИНАМИЧЕСКИЙ FIX_PROMPT ---
+            err_msg = result['error_message']
+            if "Invalid control character" in err_msg or "control character" in err_msg:
+                reason_block = (
+                    "🚨 ГЛАВНАЯ ПРИЧИНА: Ты вставил реальный (неэкранированный) перенос строки или табуляцию прямо внутрь строкового значения JSON.\n"
+                    "ПРАВИЛО: Внутри JSON-полей все строки обязаны быть строго однострочными! Любые переносы строк внутри полей 'thoughts', 'search', 'replace' или 'code' должны быть записаны спецсимволом `\\n`."
+                )
+            else:
+                reason_block = (
+                    "🚨 ГЛАВНАЯ ПРИЧИНА: Ты используешь неэкранированные двойные кавычки внутри JSON-строки.\n"
+                    "ПРАВИЛО: Внутри полей 'code', 'search' и 'replace' используй ТОЛЬКО одинарные кавычки (') для строк, импортов и HTML-атрибутов. Либо тщательно экранируй двойные (\\\")."
+                )
+
             fix_prompt = (
-                f"Твой предыдущий ответ вызвал ошибку парсера: {result['error_message']}\n"
-                "🚨 ГЛАВНАЯ ПРИЧИНА: Ты используешь неэкранированные двойные кавычки внутри JSON-строки.\n"
-                "ПРАВИЛО: Внутри полей 'code', 'search' и 'replace' используй ТОЛЬКО одинарные кавычки (') для строк, импортов и HTML-атрибутов. Либо тщательно экранируй двойные (\\\").\n\n"
-                "Исправь свой код (замени \" на ') и пришли валидный чистый JSON."
+                f"Твой предыдущий ответ вызвал ошибку парсера: {err_msg}\n"
+                f"{reason_block}\n\n"
+                "Исправь свой ответ и пришли валидный, чистый JSON без синтаксических ошибок."
             )
+            # --------------------------------------------
             
             self.agent_trace.append({"title": f"Авто-исправление ошибки (Попытка {self.retry_count})", "content": fix_prompt})
             self._save_current_trace()

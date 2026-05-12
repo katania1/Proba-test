@@ -1,9 +1,19 @@
 /**
- * 📖 БИБЛИЯ ПРОЕКТА: CONTENT.JS (v5.1 - CHUNKED INSERTION + TELEMETRY LOGS)
- * Интегрирована чанкованная вставка текста с телеметрией: 
- * скрипт сообщает IDE, сработал ли нативный Paste или потребовался чанкинг.
+ * 📖 БИБЛИЯ ПРОЕКТА: CONTENT.JS (v6.5 ULTIMATE STABLE - DOM REVERSE ENGINEERING)
+ *
+ * КЛЮЧЕВЫЕ ИЗМЕНЕНИЯ v6.5:
+ * [1] ХАРДКОРНЫЙ ПАРСИНГ СПИСКОВ И АБЗАЦЕВ — Отказ от временного div и innerText (т.к. CSS 
+ * Gemini блокирует переносы). Теперь мы напрямую обходим клонированный DOM, конвертируя
+ * теги <p>, <li>, <br> в чистые текстовые ноды с \n и маркеры списков (* ).
+ * [2] ИНТЕЛЛЕКТУАЛЬНАЯ НОРМАЛИЗАЦИЯ MARKDOWN — находит блоки <code-block> / <pre>, 
+ * извлекает имя языка из UI-заголовков и оборачивает исходный код в тройные обратные кавычки.
+ * [3] СОХРАНЕНИЕ АНТИ-ФРИЗ АРХИТЕКТУРЫ v6.2 — оставлена безопасная зачистка через Range API,
+ * щадящий Fast-Track (<= 4 КБ) и поблочная фоновая инъекция через setTimeout(0) для тяжелых задач.
  */
 
+// ==========================================================
+// ИНИЦИАЛИЗАЦИЯ ИДЕНТИФИКАТОРА ВКЛАДКИ
+// ==========================================================
 let myTabId = sessionStorage.getItem('vc_tab_id');
 if (!myTabId) {
     myTabId = 'TAB-' + Math.random().toString(36).substring(2, 6).toUpperCase();
@@ -26,131 +36,187 @@ let isLimitReached = false;
 
 // Пульс (Heartbeat) для поддержания связи с сервером Flask
 setInterval(() => {
-    fetch('http://localhost:5070/heartbeat', {
+    fetch(`${SERVER_URL}/heartbeat`, {
         method: 'POST',
-        headers: {'Content-Type': 'application/json'},
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ tab_id: myTabId, tab_name: myTabName })
-    }).catch(() => {}); 
+    }).catch(() => {});
 }, 2000);
 
 // ==========================================================
-// 0. СЕТЕВЫЕ ПРОКСИ-ФУНКЦИИ (ДЛЯ ОБХОДА CORS И ОТПРАВКИ ЛОГОВ)
+// 0. СЕТЕВЫЕ ПРОКСИ-ФУНКЦИИ И ЛОГИРОВАНИЕ
 // ==========================================================
-async function fetchGetProxy(url) {
+function fetchGetProxy(url) {
     return new Promise((resolve, reject) => {
-        chrome.runtime.sendMessage({action: "proxy_get", url: url}, (response) => {
-            if (response && response.success) resolve(response.data); else reject("Error");
+        chrome.runtime.sendMessage({ action: "proxy_get", url }, (response) => {
+            if (response && response.success) resolve(response.data);
+            else reject("proxy_get error");
         });
     });
 }
 
-async function fetchPostProxy(url, bodyText) {
+function fetchPostProxy(url, bodyText) {
     return new Promise((resolve, reject) => {
-        chrome.runtime.sendMessage({action: "proxy_post", url: url, body: bodyText}, (response) => {
-            if (response && response.success) resolve(response.data); else reject("Error");
+        chrome.runtime.sendMessage({ action: "proxy_post", url, body: bodyText }, (response) => {
+            if (response && response.success) resolve(response.data);
+            else reject("proxy_post error");
         });
     });
 }
 
-// ==========================================================
-// 1. БРОНЕБОЙНАЯ ВСТАВКА ТЕКСТА С ТЕЛЕМЕТРИЕЙ
-// ==========================================================
-async function insertLargeTextChunked(inputArea, text, chunkSize = 4000) {
-    console.log(`VibeCoder: Начинаем умную вставку текста (${text.length} символов)...`);
-    
-    const selector = 'rich-textarea > div, div[contenteditable="true"][role="textbox"], textarea#prompt-textarea';
-    let currentInput = document.querySelector(selector) || inputArea;
-    currentInput.focus();
-    
-    // Очищаем поле
-    document.execCommand('selectAll', false, null);
-    document.execCommand('delete', false, null);
-    
-    // ПОПЫТКА 1: Нативный Paste (Идеально для Gemini, не вешает браузер)
-    const dt = new DataTransfer();
-    dt.setData('text/plain', text);
-    const pasteEvent = new ClipboardEvent('paste', { 
-        clipboardData: dt, bubbles: true, cancelable: true 
-    });
-    currentInput.dispatchEvent(pasteEvent);
-    
-    await new Promise(r => setTimeout(r, 150)); // Ждем реакции React
-    
-    // Проверяем, сработал ли Paste (вставилось ли хотя бы 50% текста)
-    if (currentInput.innerText.length < text.length * 0.5) {
-        console.log("VibeCoder: Нативный Paste заблокирован. Запускаем чанкинг...");
-        
-        // Отправляем лог об ошибке в IDE
-        try {
-            await fetchPostProxy(`${SERVER_URL}/log`, JSON.stringify({
-                source_id: myTabId,
-                message: "⚠️ Защита браузера заблокировала мгновенную вставку. Использую безопасный чанкинг...",
-                color: "#ffaa00"
-            }));
-        } catch(e) {}
+function sendLog(message, color = "#aaaaaa") {
+    fetchPostProxy(`${SERVER_URL}/log`, JSON.stringify({
+        source_id: myTabId, message, color
+    })).catch(() => {});
+}
 
-        // Очищаем еще раз перед чанками
-        document.execCommand('selectAll', false, null);
-        document.execCommand('delete', false, null);
-        
-        for (let i = 0; i < text.length; i += chunkSize) {
-            currentInput = document.querySelector(selector) || currentInput;
-            currentInput.focus();
-            
-            const selection = window.getSelection();
-            selection.selectAllChildren(currentInput);
-            selection.collapseToEnd();
-            
-            const chunk = text.slice(i, i + chunkSize);
-            document.execCommand('insertText', false, chunk);
-            currentInput.dispatchEvent(new Event('input', { bubbles: true }));
-            
-            await new Promise(r => setTimeout(r, 15));
-        }
+// ==========================================================
+// 1. БЕЗОПАСНАЯ РАБОТА С DOM (ОЧИСТКА БЕЗ СИНЕГО ЭКРАНА)
+// ==========================================================
+function clearContentEditable(el) {
+    if (!el) return;
+    if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+        el.value = '';
+        el.dispatchEvent(new Event('input', { bubbles: true }));
     } else {
-        console.log("VibeCoder: Нативный Paste успешно отработал!");
-        // Отправляем лог об успехе в IDE
+        el.focus();
         try {
-            await fetchPostProxy(`${SERVER_URL}/log`, JSON.stringify({
-                source_id: myTabId,
-                message: "⚡ Промпт мгновенно загружен в чат (Нативный Paste).",
-                color: "#bb86fc"
-            }));
-        } catch(e) {}
+            // Безопасное удаление через Range API для сохранения структуры state.doc
+            const range = document.createRange();
+            range.selectNodeContents(el);
+            const sel = window.getSelection();
+            sel.removeAllRanges();
+            sel.addRange(range);
+            document.execCommand('delete', false, null);
+        } catch (e) {
+            el.innerHTML = '<p><br></p>';
+        }
+        el.dispatchEvent(new Event('input', { bubbles: true }));
     }
-    
-    // Финальная синхронизация состояний
-    currentInput = document.querySelector(selector) || currentInput;
-    currentInput.dispatchEvent(new Event('input', { bubbles: true }));
-    currentInput.dispatchEvent(new Event('change', { bubbles: true }));
-    currentInput.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
-    
-    console.log("VibeCoder: Текст успешно вставлен полностью!");
-    await new Promise(r => setTimeout(r, 400));
 }
 
 // ==========================================================
-// 2. ПЛАШКА UI (Draggable Badge)
+// 2. ПЛАВНЫЙ ИНЖЕКТОР (ДЛЯ ТЯЖЕЛЫХ ПАКЕТОВ > 4 КБ)
+// ==========================================================
+class TurboTextInjector {
+    constructor(options = {}) {
+        this.currentChunkSize = options.currentChunkSize || 3500; 
+        this.onProgress = options.onProgress || (() => {});
+    }
+
+    async inject(element, text) {
+        const chunks = this._splitIntoChunks(text, this.currentChunkSize);
+        let injected = 0;
+
+        for (let i = 0; i < chunks.length; i++) {
+            await this._yieldThread();
+
+            document.execCommand('insertText', false, chunks[i]);
+            element.dispatchEvent(new Event('input', { bubbles: true }));
+
+            injected += chunks[i].length;
+            this.onProgress(injected / text.length);
+        }
+    }
+
+    _splitIntoChunks(text, chunkSize) {
+        const chunks = [];
+        let i = 0;
+        while (i < text.length) {
+            let end = Math.min(i + chunkSize, text.length);
+            if (end < text.length) {
+                const boundary = Math.max(
+                    text.lastIndexOf('\n', end),
+                    text.lastIndexOf(' ', end)
+                );
+                if (boundary > i + 300) end = boundary + 1;
+            }
+            chunks.push(text.slice(i, end));
+            i = end;
+        }
+        return chunks;
+    }
+
+    _yieldThread() {
+        return new Promise(resolve => setTimeout(resolve, 0));
+    }
+}
+
+// ==========================================================
+// 3. ГЛАВНАЯ ФУНКЦИЯ ВСТАВКИ (ПРЯМОЙ ОПТИМИЗИРОВАННЫЙ ПОТОК)
+// ==========================================================
+async function insertLargeTextChunked(inputArea, text) {
+    console.log(`VibeCoder: Подготовка промпта (${text.length} символов)...`);
+
+    const selector = 'rich-textarea > div, div[contenteditable="true"][role="textbox"], textarea#prompt-textarea';
+    const el = document.querySelector(selector) || inputArea;
+
+    if (!el) {
+        console.error('VibeCoder: Поле ввода не найдено!');
+        return;
+    }
+
+    el.focus();
+    await new Promise(r => requestAnimationFrame(r));
+    clearContentEditable(el);
+    await new Promise(r => requestAnimationFrame(r));
+
+    const statusSpan = document.getElementById('vibe-status');
+
+    // --- ПУТЬ 1: Мгновенный Fast-Track для легких запросов (<= 4 КБ) ---
+    if (text.length <= 4000) {
+        console.log('VibeCoder: Объем <= 4КБ. Прямой инжект...');
+        document.execCommand('insertText', false, text);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        await new Promise(r => setTimeout(r, 50));
+
+        sendLog('⚡ Промпт загружен мгновенно (Fast-Track).', '#bb86fc');
+        el.focus();
+        return;
+    }
+
+    // --- ПУТЬ 2: Плавная загрузка безопасными блоками для тяжелых задач (> 4 КБ) ---
+    console.log('VibeCoder: Объем > 4КБ. Запуск анти-фриз инжектора...');
+    sendLog('⚡ Загрузка объемного контекста безопасными блоками...', '#bb86fc');
+
+    const injector = new TurboTextInjector({
+        currentChunkSize: 3500,
+        onProgress: (pct) => {
+            if (statusSpan && !statusSpan.innerText.includes('ГЕНЕРАЦИЯ')) {
+                statusSpan.innerText = `⚡ Вставка ${Math.round(pct * 100)}%`;
+                statusSpan.style.background = '#bb86fc';
+            }
+        }
+    });
+    await injector.inject(el, text);
+
+    if (statusSpan) updatePanelUI();
+    sendLog('✅ Вставка контекста успешно завершена.', '#31a24c');
+    el.focus();
+}
+
+// ==========================================================
+// 4. ПЛАШКА UI (Draggable Badge)
 // ==========================================================
 function createVibeBadge() {
     if (document.getElementById('vibe-coder-badge')) return;
     const badge = document.createElement('div');
     badge.id = 'vibe-coder-badge';
     badge.innerHTML = `
-        <div style="display: flex; align-items: center; width: 100%;">
-            <span id="vibe-drag-handle" style="margin-right: 8px; opacity: 0.5; font-size: 16px;">⠿</span>
-            🤖 <b>VibeCoder:</b> 
-            <span id="vibe-tab-name" style="cursor:pointer; border-bottom: 1px dashed #888; margin-left: 5px; margin-right: 8px;">${myTabName}</span>
-            <span id="vibe-status" style="font-size: 11px; padding: 2px 6px; border-radius: 4px; background: #3c3c3c; color: #fff; font-weight: bold;">⏳ Загрузка...</span>
+        <div style="display:flex;align-items:center;width:100%;">
+            <span id="vibe-drag-handle" style="margin-right:8px;opacity:0.5;font-size:16px;">⠿</span>
+            🤖 <b>VibeCoder:</b>
+            <span id="vibe-tab-name" style="cursor:pointer;border-bottom:1px dashed #888;margin-left:5px;margin-right:8px;">${myTabName}</span>
+            <span id="vibe-status" style="font-size:11px;padding:2px 6px;border-radius:4px;background:#3c3c3c;color:#fff;font-weight:bold;">⏳ Загрузка...</span>
         </div>
     `;
     Object.assign(badge.style, {
         position: 'fixed', left: '20px', top: (window.innerHeight - 60) + 'px',
-        backgroundColor: 'rgba(30, 30, 30, 0.85)', backdropFilter: 'blur(5px)',
+        backgroundColor: 'rgba(30,30,30,0.85)', backdropFilter: 'blur(5px)',
         color: '#d4d4d4', padding: '8px 15px', borderRadius: '8px',
         border: '1px solid #569cd6', zIndex: '999999', cursor: 'grab', userSelect: 'none'
     });
-    
+
     let isDragging = false, offsetX, offsetY;
     badge.onmousedown = (e) => {
         if (e.target.id === 'vibe-tab-name') return;
@@ -165,6 +231,17 @@ function createVibeBadge() {
         };
         document.onmouseup = () => { isDragging = false; document.onmousemove = null; };
     };
+
+    document.getElementById && badge.addEventListener('click', (e) => {
+        if (e.target.id !== 'vibe-tab-name') return;
+        const newName = prompt('Имя вкладки:', myTabName);
+        if (newName && newName.trim()) {
+            myTabName = newName.trim();
+            localStorage.setItem(`vc_name_${myTabId}`, myTabName);
+            e.target.innerText = myTabName;
+        }
+    });
+
     document.body.appendChild(badge);
 }
 createVibeBadge();
@@ -173,6 +250,7 @@ setTimeout(createVibeBadge, 1500);
 function updatePanelUI() {
     const statusSpan = document.getElementById('vibe-status');
     if (!statusSpan) return;
+    if (statusSpan.innerText.includes('Вставка')) return;
     if (isLimitReached && !window.ignoreLimitsSession) {
         statusSpan.innerText = '🛑 ЛИМИТЫ'; statusSpan.style.background = '#ff4444'; return;
     }
@@ -184,30 +262,34 @@ function updatePanelUI() {
 }
 
 // ==========================================================
-// 3. СЕТЬ И УМНЫЙ PRO-РЕЖИМ (ANTI-THINKING SELECTOR)
+// 5. PRO-РЕЖИМ И ПРОВЕРКА ЛИМИТОВ
 // ==========================================================
 function resetChat() {
-    const newChatBtn = document.querySelector('a[data-test-id="new-chat-button"], a[href^="/app"], button[aria-label*="New chat" i], button[aria-label*="Новый чат" i]');
+    const newChatBtn = document.querySelector(
+        'a[data-test-id="new-chat-button"], a[href^="/app"], button[aria-label*="New chat" i], button[aria-label*="Новый чат" i]'
+    );
     if (newChatBtn) newChatBtn.click();
     else window.location.href = "https://gemini.google.com/app";
 }
 
 async function triggerLimitReached(reason) {
     if (isLimitReached) return;
-    console.warn(`VibeCoder: Сработал триггер лимитов. Причина: ${reason}`);
+    console.warn(`VibeCoder: Лимит. Причина: ${reason}`);
     isLimitReached = true;
     updatePanelUI();
-    try { await fetchPostProxy(`${SERVER_URL}/limit_reached`, JSON.stringify({source_id: myTabId})); } catch (e) {}
+    fetchPostProxy(`${SERVER_URL}/limit_reached`, JSON.stringify({ source_id: myTabId })).catch(() => {});
 }
 
 async function checkGeminiAlerts() {
     if (window.ignoreLimitsSession) return false;
     const bodyText = (document.body.innerText || "").toLowerCase();
-    if (bodyText.includes("you've reached your pro model limit") || bodyText.includes("limit resets on") || bodyText.includes("лимит запросов исчерпан")) {
-        await triggerLimitReached("Обнаружен текст о лимитах на странице"); return true;
+    if (bodyText.includes("you've reached your pro model limit") ||
+        bodyText.includes("limit resets on") ||
+        bodyText.includes("лимит запросов исчерпан")) {
+        await triggerLimitReached("Текст лимита на странице"); return true;
     }
     const alerts = document.querySelectorAll('snack-bar, .error-message, [role="alert"], .limit-message');
-    for (let el of alerts) {
+    for (const el of alerts) {
         const t = (el.innerText || "").toLowerCase();
         if (t.includes("limit") || t.includes("лимит") || t.includes("upgrade")) {
             await triggerLimitReached(t); return true;
@@ -217,22 +299,25 @@ async function checkGeminiAlerts() {
 }
 
 async function ensureProMode() {
-    if (window.ignoreLimitsSession) return true; 
+    if (window.ignoreLimitsSession) return true;
 
-    const modelSelector = document.querySelector('[data-test-id="bard-mode-menu-button"], button.input-area-switch');
-    if (!modelSelector) return true; 
+    const modelSelector = document.querySelector(
+        '[data-test-id="bard-mode-menu-button"], button.input-area-switch'
+    );
+    if (!modelSelector) return true;
 
     const currentText = (modelSelector.innerText || modelSelector.textContent || "").toLowerCase().trim();
-    const isProActive = currentText.includes('pro') || currentText.includes('advanced');
-    const isThinkingActive = currentText.includes('thinking');
-
-    if (isProActive && !isThinkingActive) return true;
+    if ((currentText.includes('pro') || currentText.includes('advanced')) && !currentText.includes('thinking')) {
+        return true;
+    }
 
     modelSelector.click();
-    await new Promise(r => setTimeout(r, 800)); 
+    await new Promise(r => setTimeout(r, 400));
 
     const overlay = document.querySelector('.cdk-overlay-container') || document.body;
-    const menuItems = Array.from(overlay.querySelectorAll('[role="menuitem"], [role="option"], [role="menuitemradio"], button.mat-mdc-menu-item'));
+    const menuItems = Array.from(overlay.querySelectorAll(
+        '[role="menuitem"], [role="option"], [role="menuitemradio"], button.mat-mdc-menu-item'
+    ));
 
     const proItem = menuItems.find(i => {
         const t = (i.innerText || i.textContent || "").toLowerCase();
@@ -241,59 +326,125 @@ async function ensureProMode() {
 
     if (proItem) {
         const itemText = (proItem.innerText || proItem.textContent || "").toLowerCase();
-        if (itemText.includes('upgrade') || itemText.includes('обновить') || proItem.disabled || proItem.getAttribute('aria-disabled') === 'true') {
-            document.body.click(); 
-            await triggerLimitReached("Опция Pro заблокирована/требует обновления");
+        if (itemText.includes('upgrade') || itemText.includes('обновить') ||
+            proItem.disabled || proItem.getAttribute('aria-disabled') === 'true') {
+            document.body.click();
+            await triggerLimitReached("Pro заблокирован/требует обновления");
             return false;
         }
-        
         proItem.click();
-        await new Promise(r => setTimeout(r, 1200)); 
+
+        const overlayEl = document.querySelector('.cdk-overlay-container');
+        if (overlayEl) {
+            await new Promise(resolve => {
+                const observer = new MutationObserver(() => {
+                    if (!document.querySelector('[role="menuitem"]')) {
+                        observer.disconnect(); resolve();
+                    }
+                });
+                observer.observe(overlayEl, { childList: true, subtree: true });
+                setTimeout(() => { observer.disconnect(); resolve(); }, 1000);
+            });
+        }
         return true;
-    } else {
-        document.body.click(); 
-        return true; 
     }
+
+    document.body.click();
+    return true;
 }
 
+// ==========================================================
+// 6. УТИЛИТЫ И РЕВЕРС-ИНЖИНИРИНГ МАРКДАУНА
+// ==========================================================
 function base64ToFile(b64, mime, filename) {
-    const byteChars = atob(b64);
-    const byteArrays = [];
-    for (let i = 0; i < byteChars.length; i += 512) {
-        const slice = byteChars.slice(i, i + 512);
-        const byteNums = new Array(slice.length);
-        for (let j = 0; j < slice.length; j++) byteNums[j] = slice.charCodeAt(j);
-        byteArrays.push(new Uint8Array(byteNums));
-    }
-    return new File([new Blob(byteArrays, { type: mime })], filename, { type: mime });
+    const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+    return new File([bytes], filename, { type: mime });
 }
 
-// ==========================================================
-// 4. ПРЯМОЕ ЧТЕНИЕ ТЕКСТА
-// ==========================================================
+/**
+ * [FIX-REVERSE] Интеллектуальное восстановление Markdown-разметки из DOM-дерева Gemini.
+ * Создает изолированную копию узла ответа, находит блоки кода и жестко парсит списки и абзацы.
+ */
 function getLastModelText() {
     const elements = Array.from(document.querySelectorAll('message-content'));
-    const validContents = elements.filter(el => !el.closest('user-query, [data-message-author-role="user"]'));
+    const validContents = elements.filter(el =>
+        !el.closest('user-query, [data-message-author-role="user"]')
+    );
     
-    if (validContents.length > 0) {
-        const el = validContents[validContents.length - 1];
-        let text = el.innerText || el.textContent;
-        return text ? text.replace(/\u00A0/g, ' ').replace(/\u200B/g, '').trim() : "";
-    }
-    return "";
+    if (validContents.length === 0) return "";
+    
+    // Берем последний актуальный пузырь ответа
+    const originalNode = validContents[validContents.length - 1];
+    
+    // Клонируем узел, чтобы наши манипуляции не сломали виртуальный DOM React в браузере
+    const clone = originalNode.cloneNode(true);
+    
+    // Находим все контейнеры исходного кода
+    const preTags = Array.from(clone.querySelectorAll('pre'));
+    
+    preTags.forEach(pre => {
+        let lang = "";
+        const wrapper = pre.closest('code-block, .code-block, [data-test-id*="code-block"]') || pre;
+        
+        if (wrapper !== pre) {
+            const header = wrapper.querySelector('.code-block-header, .language-name, [data-test-id*="language"], span:first-child');
+            if (header) {
+                lang = (header.innerText || header.textContent || "").trim().split(/\s+/)[0];
+                if (lang.toLowerCase().includes('copy')) lang = "";
+            }
+        }
+        
+        const codeTag = pre.querySelector('code');
+        if (!lang && codeTag && codeTag.className) {
+            const match = codeTag.className.match(/language-(\w+)/);
+            if (match) lang = match[1];
+        }
+        
+        const sourceCode = (pre.innerText || pre.textContent || "").trimEnd();
+        const mdFormattedNode = document.createTextNode(`\n\n\`\`\`${lang.toLowerCase()}\n${sourceCode}\n\`\`\`\n\n`);
+        wrapper.replaceWith(mdFormattedNode);
+    });
+    
+    // [FIX-RENDER v6.5] Хардкорная расстановка переносов без CSS-зависимостей браузера
+    // Явно конвертируем блочные элементы и списки в текстовые переносы внутри клона
+    clone.querySelectorAll('br').forEach(br => br.replaceWith(document.createTextNode('\n')));
+    
+    clone.querySelectorAll('p, h1, h2, h3, h4, h5, h6').forEach(el => {
+        el.appendChild(document.createTextNode('\n\n'));
+    });
+    
+    clone.querySelectorAll('li').forEach(el => {
+        // Вставляем маркер Markdown (*) в начало каждого пункта
+        el.insertBefore(document.createTextNode('\n* '), el.firstChild);
+        el.appendChild(document.createTextNode('\n'));
+    });
+    
+    clone.querySelectorAll('div').forEach(el => {
+        el.appendChild(document.createTextNode('\n'));
+    });
+
+    // Теперь textContent безопасно извлечет все наши вставленные переносы
+    let textTextText = clone.textContent || "";
+    
+    // Очищаем от невидимых символов и схлопываем множественные пустые строки (максимум 2)
+    textTextText = textTextText.replace(/\u00A0/g, ' ').replace(/\u200B/g, '');
+    textTextText = textTextText.replace(/\n\s*\n\s*\n/g, '\n\n'); 
+    
+    return textTextText.trim();
 }
 
 function checkIsGenerating() {
     const stopBtn = document.querySelector('button[aria-label*="stop gen" i], button[aria-label*="останови" i]');
     if (stopBtn && stopBtn.offsetWidth > 0) return true;
-    
+
     const activeResponses = document.querySelectorAll('model-response');
     if (activeResponses.length > 0) {
-        const lastResponse = activeResponses[activeResponses.length - 1];
-        const spinner = lastResponse.querySelector('mat-progress-spinner, .gmat-mdc-progress-spinner, mat-spinner');
+        const last = activeResponses[activeResponses.length - 1];
+        const spinner = last.querySelector('mat-progress-spinner, .gmat-mdc-progress-spinner, mat-spinner');
         if (spinner) {
             const style = window.getComputedStyle(spinner);
-            if (spinner.offsetWidth > 0 && spinner.offsetHeight > 0 && style.display !== 'none' && style.opacity !== '0' && style.visibility !== 'hidden') { 
+            if (spinner.offsetWidth > 0 && spinner.offsetHeight > 0 &&
+                style.display !== 'none' && style.opacity !== '0' && style.visibility !== 'hidden') {
                 return true;
             }
         }
@@ -302,47 +453,176 @@ function checkIsGenerating() {
 }
 
 // ==========================================================
-// 5. ОРКЕСТРАТОР И ИНЪЕКЦИЯ (ГАРАНТИРОВАННАЯ ДОСТАВКА)
+// 7. ЗАГРУЗКА ФАЙЛОВ (С АГРЕССИВНЫМ ДЕДЛАЙНОМ 3 СЕКУНДЫ)
+// ==========================================================
+async function uploadFiles(filesPayload, inputArea) {
+    if (!filesPayload || filesPayload.length === 0) return;
+
+    try {
+        const files = filesPayload.map(f => base64ToFile(f.data, f.mime, f.name));
+        const dt = new DataTransfer();
+        files.forEach(f => dt.items.add(f));
+
+        const addBtns = document.querySelectorAll(
+            'button[aria-label*="upload" i], button[aria-label*="загруз" i], button[aria-label*="attach" i], button[aria-label*="прикреп" i]'
+        );
+        if (addBtns.length > 0) {
+            addBtns[0].click();
+            await new Promise(r => setTimeout(r, 400));
+        }
+
+        const fileInputs = document.querySelectorAll('input[type="file"]');
+        if (fileInputs.length > 0) {
+            const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'files').set;
+            fileInputs.forEach(fi => {
+                try {
+                    nativeSetter.call(fi, dt.files);
+                    fi.dispatchEvent(new Event('change', { bubbles: true }));
+                } catch (e) {}
+            });
+        } else {
+            inputArea.dispatchEvent(new DragEvent('drop', {
+                bubbles: true, cancelable: true, dataTransfer: dt
+            }));
+        }
+
+        const start = Date.now();
+        while (Date.now() - start < 3000) {
+            const container = inputArea.closest('form, .input-area, rich-textarea, [role="region"]') || document.body;
+            const chips = container.querySelectorAll(
+                'file-attachment-chip, attachment-chip, preview-chip, .file-preview, [data-test-id*="attachment"]'
+            );
+            if (chips.length >= filesPayload.length) {
+                const spinners = container.querySelectorAll('mat-progress-spinner, .gmat-mdc-progress-spinner, [role="progressbar"]');
+                let uploading = false;
+                spinners.forEach(s => {
+                    if (s.offsetWidth > 0 && window.getComputedStyle(s).display !== 'none') uploading = true;
+                });
+                if (!uploading) { await new Promise(r => setTimeout(r, 400)); break; }
+            }
+            await new Promise(r => setTimeout(r, 300));
+        }
+    } catch (err) {
+        console.warn('VibeCoder: Ошибка загрузки файлов:', err);
+    }
+}
+
+// ==========================================================
+// 8. ОТПРАВКА В GEMINI
+// ==========================================================
+async function sendToGemini(text, filesPayload = []) {
+    if (!await ensureProMode()) {
+        isProcessing = false;
+        return;
+    }
+
+    const inputArea = document.querySelector(
+        'rich-textarea > div, div[contenteditable="true"][role="textbox"], textarea#prompt-textarea'
+    );
+    if (!inputArea) { isProcessing = false; return; }
+
+    if (filesPayload && filesPayload.length > 0) {
+        await uploadFiles(filesPayload, inputArea);
+    }
+
+    await insertLargeTextChunked(inputArea, text);
+
+    const fieldSnapshot = (inputArea.innerText || inputArea.value || '').substring(0, 200);
+    console.log(`VibeCoder: Содержимое поля перед Send:\n"${fieldSnapshot}"`);
+    if (!fieldSnapshot.trim()) {
+        console.error('VibeCoder: ⚠️ ПОЛЕ ПУСТОЕ! Отправка прервана.');
+        sendLog('❌ Поле ввода пустое перед отправкой. Задача не выполнена.', '#ff4444');
+        isProcessing = false;
+        activeTaskId = null;
+        return;
+    }
+
+    window.textBeforeSend = getLastModelText();
+    window.waitingForNewBubble = true;
+    window.waitStartTime = Date.now();
+
+    const sendStart = Date.now();
+    let sent = false;
+
+    while (Date.now() - sendStart < 5000) {
+        const sendBtn = Array.from(document.querySelectorAll('button')).find(b => {
+            const label = ((b.getAttribute('aria-label') || '') + ' ' + (b.innerText || '')).toLowerCase();
+            return (label.includes('send') || label.includes('отправить')) && !label.includes('feedback');
+        }) || document.querySelector('[data-testid="send-button"], .send-button');
+
+        if (sendBtn && !sendBtn.disabled && sendBtn.getAttribute('aria-disabled') !== 'true') {
+            sendBtn.click();
+            sent = true;
+            console.log('VibeCoder: ✅ Send нажат.');
+            break;
+        }
+        await new Promise(r => setTimeout(r, 150));
+    }
+
+    if (!sent) {
+        const fallback = document.querySelector(
+            '[data-testid="send-button"], .send-button, button[aria-label*="send" i], button[aria-label*="отправить" i]'
+        );
+        if (fallback) {
+            fallback.click();
+            console.log('VibeCoder: Send через fallback.');
+        } else {
+            console.error('VibeCoder: Кнопка Send не найдена!');
+            sendLog('❌ Кнопка Send не найдена!', '#ff4444');
+            window.waitingForNewBubble = false;
+            isProcessing = false;
+            activeTaskId = null;
+        }
+    }
+}
+
+// ==========================================================
+// 9. ГЛАВНЫЙ ОРКЕСТРАТОР
 // ==========================================================
 async function checkServer() {
-    if (isProcessing) return; 
+    if (isProcessing && !window.waitingForNewBubble) return;
+
     try {
-        const data = await fetchGetProxy(`${SERVER_URL}/get_task?target_id=${encodeURIComponent(myTabId)}`);
-        
-        if (data.status === "success" && data.task) {
-            activeTaskId = data.task.id;
-            isProcessing = true;
-            lastServerState = "RUNNING";
-            updatePanelUI();
-            currentCandidateText = "";
-            stableCount = 0;
-            await sendToGemini(data.task.prompt, data.task.images);
-            return;
+        if (!isProcessing && !activeTaskId) {
+            const data = await fetchGetProxy(`${SERVER_URL}/get_task?target_id=${encodeURIComponent(myTabId)}`);
+            if (data.status === "success" && data.task) {
+                activeTaskId = data.task.id;
+                isProcessing = true;
+                lastServerState = "RUNNING";
+                updatePanelUI();
+                currentCandidateText = "";
+                stableCount = 0;
+                await sendToGemini(data.task.prompt, data.task.images);
+                return;
+            }
         }
 
         if (!activeTaskId) {
             lastServerState = "STOPPED"; updatePanelUI(); return;
         }
 
-        let currentText = getLastModelText();
+        checkGeminiAlerts().catch(() => {});
+
+        const currentText = getLastModelText();
 
         if (window.waitingForNewBubble) {
-            if (currentText !== window.textBeforeSend || (Date.now() - window.waitStartTime > 15000)) {
+            const elapsed = Date.now() - window.waitStartTime;
+            if (currentText !== window.textBeforeSend || elapsed > 15000) {
                 window.waitingForNewBubble = false;
+                isProcessing = false;
                 stableCount = 0;
             } else {
                 lastServerState = "RUNNING"; updatePanelUI(); return;
             }
         }
 
-        let isGenerating = checkIsGenerating();
-        if (isGenerating) { 
+        if (checkIsGenerating()) {
             stableCount = 0;
-            lastServerState = "RUNNING"; updatePanelUI(); return; 
+            lastServerState = "RUNNING"; updatePanelUI(); return;
         }
 
-        if (currentText && currentText.trim() !== "") {
-            let diffText = currentText.replace(/Thinking for \d+s/gi, '').trim();
+        if (currentText && currentText.trim()) {
+            const diffText = currentText.replace(/Thinking for \d+s/gi, '').trim();
 
             if (diffText !== currentCandidateText) {
                 currentCandidateText = diffText;
@@ -354,12 +634,15 @@ async function checkServer() {
             if (stableCount >= 2 && activeTaskId) {
                 isProcessing = true;
                 lastServerState = "STOPPED"; updatePanelUI();
-                
-                const payloadString = JSON.stringify({ task_id: activeTaskId, result: currentText, source_id: myTabId });
                 try {
-                    await fetchPostProxy(`${SERVER_URL}/post_result`, payloadString);
-                } catch (err) {} finally {
-                    isProcessing = false; activeTaskId = null;
+                    await fetchPostProxy(`${SERVER_URL}/post_result`, JSON.stringify({
+                        task_id: activeTaskId, result: currentText, source_id: myTabId
+                    }));
+                } catch (err) {
+                    console.error('VibeCoder: Ошибка отправки результата:', err);
+                } finally {
+                    isProcessing = false;
+                    activeTaskId = null;
                 }
             } else {
                 lastServerState = "RUNNING"; updatePanelUI();
@@ -372,95 +655,5 @@ async function checkServer() {
     }
 }
 
-async function sendToGemini(text, filesPayload = []) {
-    if (!await ensureProMode()) { 
-        isProcessing = false; 
-        return; 
-    }
-    
-    const inputArea = document.querySelector('rich-textarea > div, div[contenteditable="true"][role="textbox"], textarea#prompt-textarea');
-    if (!inputArea) { isProcessing = false; return; }
-    
-    // --- ЭТАП 1: ВБРОС И ВИЗУАЛЬНЫЙ HANDSHAKE VFS (Картинки и RAG) ---
-    if (filesPayload && filesPayload.length > 0) {
-        try {
-            const files = filesPayload.map(fileObj => base64ToFile(fileObj.data, fileObj.mime, fileObj.name));
-            const dt = new DataTransfer();
-            files.forEach(f => dt.items.add(f));
-            
-            const addBtns = document.querySelectorAll('button[aria-label*="upload" i], button[aria-label*="загруз" i], button[aria-label*="attach" i], button[aria-label*="прикреп" i]');
-            if (addBtns.length > 0) { addBtns[0].click(); await new Promise(r => setTimeout(r, 400)); }
-            
-            let fileInputs = document.querySelectorAll('input[type="file"]');
-            if (fileInputs.length > 0) {
-                const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'files').set;
-                fileInputs.forEach(fi => { try { nativeSetter.call(fi, dt.files); fi.dispatchEvent(new Event('change', { bubbles: true })); } catch(e) {} });
-            } else {
-                const dropEvent = new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt });
-                inputArea.dispatchEvent(dropEvent);
-            }
-            
-            const startMountWait = Date.now();
-            let isFullyMounted = false;
-            
-            while (Date.now() - startMountWait < 15000) {
-                const formContainer = inputArea.closest('form, .input-area, rich-textarea, [role="region"]') || document.body;
-                const renderedChips = formContainer.querySelectorAll('file-attachment-chip, attachment-chip, preview-chip, .file-preview, [data-test-id*="attachment"]');
-                
-                if (renderedChips.length >= filesPayload.length) {
-                    const spinners = formContainer.querySelectorAll('mat-progress-spinner, .gmat-mdc-progress-spinner, [role="progressbar"]');
-                    let hasActiveUpload = false;
-                    
-                    spinners.forEach(s => {
-                        if (s.offsetWidth > 0 && window.getComputedStyle(s).display !== 'none') {
-                            hasActiveUpload = true;
-                        }
-                    });
-                    
-                    if (!hasActiveUpload) {
-                        isFullyMounted = true;
-                        await new Promise(r => setTimeout(r, 1000));
-                        break;
-                    }
-                }
-                await new Promise(r => setTimeout(r, 400));
-            }
-        } catch (err) {}
-    }
-
-    // --- ЭТАП 2: ВСТАВКА ТЕКСТА (Нативный Paste или Чанки) ---
-    await insertLargeTextChunked(inputArea, text);
-    
-    // --- ЭТАП 3: ОЖИДАНИЕ РАЗБЛОКИРОВКИ И КЛИК ОТПРАВКИ ---
-    window.textBeforeSend = getLastModelText();
-    window.waitingForNewBubble = true;
-    window.waitStartTime = Date.now();
-
-    const startSendWait = Date.now();
-    let isSentSuccessfully = false;
-
-    while (Date.now() - startSendWait < 8000) {
-        const buttons = Array.from(document.querySelectorAll('button'));
-        const sendBtn = buttons.find(b => {
-            const combined = ((b.getAttribute('aria-label') || '') + " " + (b.innerText || '')).toLowerCase();
-            return (combined.includes('send') || combined.includes('отправить')) && !combined.includes('feedback');
-        }) || document.querySelector('[data-testid="send-button"], .send-button');
-
-        if (sendBtn && !sendBtn.disabled && sendBtn.getAttribute('aria-disabled') !== 'true') {
-            sendBtn.click();
-            isSentSuccessfully = true;
-            break;
-        }
-        await new Promise(r => setTimeout(r, 300));
-    }
-
-    if (!isSentSuccessfully) {
-        const fallbackBtn = document.querySelector('[data-testid="send-button"], .send-button, button[aria-label*="send" i], button[aria-label*="отправить" i]');
-        if (fallbackBtn) fallbackBtn.click();
-    }
-
-    setTimeout(() => { isProcessing = false; }, 3500);
-}
-
-// Запуск основного цикла проверки задач
-setInterval(checkServer, 3000);
+// Опрос сервера каждую секунду
+setInterval(checkServer, 1000);

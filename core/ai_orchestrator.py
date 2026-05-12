@@ -69,6 +69,32 @@ class AIOrchestrator:
         # --- ФИКС НЕВИДИМЫХ СИМВОЛОВ GEMINI ---
         json_str = json_str.replace('\xa0', ' ').replace('\u200b', '')
         
+        # --- ИНТЕЛЛЕКТУАЛЬНЫЙ ПРЕ-ПАРСЕР (FSM): Экранирование живых управляющих символов внутри строк ---
+        cleaned_chars = []
+        in_string = False
+        escape = False
+        for char in json_str:
+            if escape:
+                cleaned_chars.append(char)
+                escape = False
+            elif char == '\\':
+                cleaned_chars.append(char)
+                escape = True
+            elif char == '"':
+                in_string = not in_string
+                cleaned_chars.append(char)
+            elif in_string and char in ('\n', '\r', '\t'):
+                if char == '\n':
+                    cleaned_chars.append('\\n')
+                elif char == '\r':
+                    cleaned_chars.append('\\r')
+                elif char == '\t':
+                    cleaned_chars.append('\\t')
+            else:
+                cleaned_chars.append(char)
+        json_str = "".join(cleaned_chars)
+        # ------------------------------------------------------------------------------------------------
+        
         # Извлекаем текст ПОСЛЕ JSON (тот самый "хвост" с описанием структуры)
         extra_text = raw_text[end+1:].strip()
         
