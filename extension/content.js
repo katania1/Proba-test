@@ -1,14 +1,13 @@
 /**
- * 📖 БИБЛИЯ ПРОЕКТА: CONTENT.JS (v6.5 ULTIMATE STABLE - DOM REVERSE ENGINEERING)
+ * 📖 БИБЛИЯ ПРОЕКТА: CONTENT.JS (v6.7 ULTIMATE HYBRID)
  *
- * КЛЮЧЕВЫЕ ИЗМЕНЕНИЯ v6.5:
- * [1] ХАРДКОРНЫЙ ПАРСИНГ СПИСКОВ И АБЗАЦЕВ — Отказ от временного div и innerText (т.к. CSS 
- * Gemini блокирует переносы). Теперь мы напрямую обходим клонированный DOM, конвертируя
- * теги <p>, <li>, <br> в чистые текстовые ноды с \n и маркеры списков (* ).
- * [2] ИНТЕЛЛЕКТУАЛЬНАЯ НОРМАЛИЗАЦИЯ MARKDOWN — находит блоки <code-block> / <pre>, 
- * извлекает имя языка из UI-заголовков и оборачивает исходный код в тройные обратные кавычки.
- * [3] СОХРАНЕНИЕ АНТИ-ФРИЗ АРХИТЕКТУРЫ v6.2 — оставлена безопасная зачистка через Range API,
- * щадящий Fast-Track (<= 4 КБ) и поблочная фоновая инъекция через setTimeout(0) для тяжелых задач.
+ * КЛЮЧЕВЫЕ ИЗМЕНЕНИЯ v6.7:
+ * [1] АВТО-РАДАР РУЧНЫХ ЗАДАЧ — если скрипт видит, что началась генерация (крутится спиннер), 
+ * но задачи от сервера не поступало, он автоматически берет эту генерацию на контроль 
+ * и перехватывает результат (идеально для Drag-and-Drop + Ctrl+V).
+ * [2] ОТКЛЮЧЕНИЕ ДВОЙНОГО КЛИКА — код Секции 10 деактивирован, чтобы исключить медленные 
+ * JS-инъекции. Теперь мы полагаемся исключительно на мгновенный нативный Ctrl+V ОС.
+ * [3] ХАРДКОРНЫЙ ПАРСИНГ — сохранено жесткое форматирование списков и Markdown.
  */
 
 // ==========================================================
@@ -595,6 +594,20 @@ async function checkServer() {
                 await sendToGemini(data.task.prompt, data.task.images);
                 return;
             }
+
+            // ---> НОВОЕ: ПАССИВНЫЙ РАДАР (ДЛЯ DRAG-AND-DROP) <---
+            // Если задачи от сервера нет, но мы видим, что ИИ начал писать 
+            // (пользователь нажал Enter вручную после Drag'a)
+            if (checkIsGenerating()) {
+                activeTaskId = "manual_drag_task_" + Date.now();
+                isProcessing = true;
+                lastServerState = "RUNNING"; 
+                updatePanelUI();
+                currentCandidateText = "";
+                stableCount = 0;
+                sendLog("📡 Засечена ручная генерация! Начинаем перехват ответа...", "#bb86fc");
+                return;
+            }
         }
 
         if (!activeTaskId) {
@@ -657,3 +670,32 @@ async function checkServer() {
 
 // Опрос сервера каждую секунду
 setInterval(checkServer, 1000);
+
+// ==========================================================
+// 10. ВИРТУАЛЬНЫЙ БУФЕР ОБМЕНА (ОТКЛЮЧЕН В v6.7)
+// ==========================================================
+// Мы намеренно отключили этот код двойного клика, так как программная вставка 
+// больших объемов текста через JavaScript вызывает зависание редактора Gemini.
+// В версии 6.7 мы полагаемся исключительно на нативную вставку Ctrl+V от самой ОС.
+/*
+document.addEventListener('dblclick', async (e) => {
+    const inputArea = document.querySelector('rich-textarea > div, div[contenteditable="true"][role="textbox"], textarea#prompt-textarea');
+    
+    // Если кликнули по полю ввода
+    if (inputArea && (e.target === inputArea || inputArea.contains(e.target))) {
+        try {
+            // Обращаемся к виртуальному буферу на сервере
+            const data = await fetchGetProxy(`${SERVER_URL}/get_clipboard`);
+            if (data && data.status === "success" && data.text) {
+                console.log("VibeCoder: 🎯 Виртуальный буфер получен. Вставляем текст...");
+                sendLog("📥 Вставка текста из виртуального буфера...", "#31a24c");
+                
+                // Вставляем безопасно, чтобы не подвесить браузер
+                await insertLargeTextChunked(inputArea, data.text);
+            }
+        } catch (err) {
+            console.warn("VibeCoder: Буфер пуст или сервер недоступен.");
+        }
+    }
+});
+*/

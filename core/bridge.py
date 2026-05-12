@@ -37,9 +37,13 @@ class VibeBridge:
         self.lock = threading.Lock()
         self.task_counter = 1
         
+        # --- ВИРТУАЛЬНЫЙ БУФЕР ОБМЕНА ---
+        self.pending_clipboard_text = ""
+        self.pending_clipboard_time = 0
+        
         self.on_result_received = None
         self.on_limit_reached = None
-        self.on_log_received = None  # КРИТИЧЕСКИЙ ФИКС: Коллбэк для логов телеметрии
+        self.on_log_received = None  
         
         self.is_paused = False
         self.active_tabs = {}
@@ -103,7 +107,6 @@ class VibeBridge:
                 self.on_limit_reached()
             return jsonify({"status": "success"})
 
-        # КРИТИЧЕСКИЙ ФИКС: Эндпоинт для приема логов из расширения (Чанки vs Paste)
         @self.app.route('/log', methods=['POST'])
         def receive_log():
             data = request.json
@@ -113,7 +116,26 @@ class VibeBridge:
                 return jsonify({"status": "success"})
             return jsonify({"status": "error"}), 400
 
-    # ---> ДОБАВЛЕН ПАРАМЕТР IMAGES <---
+        # ---> НОВЫЙ ЭНДПОИНТ: Отдача виртуального буфера с автоочисткой
+        @self.app.route('/get_clipboard', methods=['GET'])
+        def get_clipboard():
+            with self.lock:
+                if self.pending_clipboard_text:
+                    # Проверяем, не прошло ли больше 60 секунд
+                    if time.time() - self.pending_clipboard_time <= 60:
+                        text = self.pending_clipboard_text
+                        self.pending_clipboard_text = ""  # Одноразовая отдача (сразу очищаем)
+                        return jsonify({"status": "success", "text": text})
+                    else:
+                        self.pending_clipboard_text = ""  # Время вышло, сжигаем текст
+                return jsonify({"status": "empty"})
+
+    def set_clipboard(self, text):
+        """Метод для сохранения текста в буфер со стороны PyQt"""
+        with self.lock:
+            self.pending_clipboard_text = text
+            self.pending_clipboard_time = time.time()
+
     def add_task(self, prompt, is_relay=False, target_id=None, images=None):
         with self.lock:
             task = {

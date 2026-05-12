@@ -2,12 +2,14 @@ import os
 import re
 import base64
 import json
+import shutil
+from pathlib import Path
 from datetime import datetime
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QSplitter, 
                              QVBoxLayout, QDialog, QTabWidget, QTextBrowser, 
                              QLabel, QFileDialog, QPushButton, QMessageBox, QSizePolicy, QApplication)
-from PyQt6.QtCore import Qt, QDir, QUrl, QSettings, QEvent, QFileSystemWatcher
-from PyQt6.QtGui import QShortcut, QKeySequence, QAction
+from PyQt6.QtCore import Qt, QDir, QUrl, QSettings, QEvent, QFileSystemWatcher, QTimer, QMimeData
+from PyQt6.QtGui import QShortcut, QKeySequence, QAction, QDrag, QPixmap
 
 # Импорты ядра
 from core.editor import DarkPythonEditor
@@ -30,6 +32,104 @@ from core.terminal import TerminalWidget
 from core.rag_controller import RagController
 from core.status_bar import VibeStatusBar
 from core.bottom_panel import BottomPanelWidget
+
+class VibeDragButton(QPushButton):
+    """
+    Гибридная кнопка отправки v3.0 (Умный Drag).
+    """
+    def __init__(self, text, main_window):
+        super().__init__(text)
+        self.mw = main_window
+        self.drag_start_pos = None
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.setToolTip("Клик — Обычная отправка\nПеретаскивание — Мгновенный Drop файлов + Ctrl+V текста")
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.drag_start_pos = event.pos()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        super().mouseReleaseEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if not (event.buttons() & Qt.MouseButton.LeftButton) or not self.drag_start_pos:
+            return
+        if (event.pos() - self.drag_start_pos).manhattanLength() < QApplication.startDragDistance():
+            return
+
+        self.drag_start_pos = None
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.start_vibe_drag()
+
+    def start_vibe_drag(self):
+        user_text = self.mw.prompt_input.toPlainText().strip()
+        if not user_text:
+            self.mw.log_system("⚠️ Введите запрос перед перетягиванием!", color="#ffaa00")
+            return
+
+        payload = self.mw.ai_controller.context_builder.build_payload(user_text, is_coding_mode=True, is_browser=True)
+        full_prompt = payload["text"]
+        image_paths = payload.get("image_paths", [])
+
+        # ОТОБРАЖЕНИЕ В ЧАТЕ И ЛОГАХ
+        mode_notice = "⚡ Кодинг (Hybrid Drag)"
+        self.mw.chat_logger.log("USER", user_text)
+        self.mw.chat_history.append(f"<br><span style='color: #569cd6;'><b>ВЫ</b> [{mode_notice}]: {user_text}</span>")
+        self.mw.scroll_chat()
+        
+        self.mw.tokens_sent += self.mw.ai_controller.estimate_tokens(full_prompt)
+        self.mw.update_status_bar()
+
+        # Всегда копируем огромный текст в системный буфер обмена для мгновенного Ctrl+V
+        QApplication.clipboard().setText(full_prompt)
+
+        # ЕСЛИ ЕСТЬ КАРТИНКИ: инициируем физическое перетаскивание
+        if image_paths:
+            self.mw.log_system("🚀 Сборка пакета с картинками...", color="#bb86fc")
+            self.mw.log_system("📋 Текст в буфере. Бросьте файлы в чат -> нажмите Ctrl+V -> Enter.", color="#31a24c", is_bold=True)
+            
+            transit_dir = Path(self.mw.project_path) / ".vibecoder" / "transit"
+            transit_dir.mkdir(parents=True, exist_ok=True)
+            
+            urls = []
+            for img_path in image_paths:
+                if os.path.exists(img_path):
+                    urls.append(QUrl.fromLocalFile(os.path.realpath(img_path)))
+
+            drag = QDrag(self)
+            mime = QMimeData()
+            if urls:
+                mime.setUrls(urls)
+            
+            drag.setMimeData(mime)
+            drag.setPixmap(self.grab().scaled(120, 45, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+            
+            result = drag.exec(Qt.DropAction.CopyAction)
+            
+            QTimer.singleShot(20000, lambda: self.cleanup_transit(transit_dir))
+            
+            if result != Qt.DropAction.IgnoreAction:
+                self.mw.prompt_input.clear()
+                self.mw.attachment_panel.clear()
+                self.mw.ai_controller.register_drag_task(full_prompt)
+        
+        # ЕСЛИ КАРТИНОК НЕТ: просто очищаем поле и ждем ответа, без визуального "пустого" перетаскивания
+        else:
+            self.mw.log_system("📋 Картинки не прикреплены. Текст скопирован в буфер!", color="#bb86fc")
+            self.mw.log_system("👉 Перейдите в чат -> нажмите Ctrl+V -> Enter.", color="#31a24c", is_bold=True)
+            self.mw.prompt_input.clear()
+            self.mw.attachment_panel.clear()
+            self.mw.ai_controller.register_drag_task(full_prompt)
+
+    def cleanup_transit(self, transit_dir):
+        try:
+            if transit_dir.exists():
+                shutil.rmtree(transit_dir)
+        except:
+            pass
 
 
 class MainWindow(QMainWindow):
@@ -194,7 +294,7 @@ class MainWindow(QMainWindow):
         self.btn_chat.setStyleSheet(get_btn_style("transparent", "rgba(86, 156, 214, 0.1)", "rgba(86, 156, 214, 0.25)", color="#569cd6", border="1px solid #569cd6"))
         self.btn_chat.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
 
-        self.btn_code = QPushButton("⚡ Кодить")
+        self.btn_code = VibeDragButton("⚡ Кодить", self)
         self.btn_code.setFixedHeight(26)
         self.btn_code.setMinimumWidth(80)
         self.btn_code.setStyleSheet(get_btn_style("#0e639c", "#1177bb", "#094771"))
@@ -527,13 +627,9 @@ class MainWindow(QMainWindow):
         self.prompt_input.project_path = new_path
         self.terminal.update_project_path(new_path)
         
-        # --- ФИКС УТЕЧКИ КОНТЕКСТА (ОБНОВИТЕ ЭТОТ БЛОК) ---
         if hasattr(self.ai_controller, 'mcp_manager'):
-            # ВМЕСТО: self.ai_controller.mcp_manager.project_path = new_path
-            # ИСПОЛЬЗУЕМ ВЫЗОВ МЕТОДА:
             self.ai_controller.mcp_manager.update_project_path(new_path)
 
-        # --- ФИКС: ОЧИСТКА СТАРЫХ ПОТОКОВ RAG ПЕРЕД ПЕРЕСОЗДАНИЕМ ---
         if hasattr(self, 'rag_controller') and self.rag_controller:
             self.rag_controller.cleanup()
             try:
@@ -573,8 +669,6 @@ class MainWindow(QMainWindow):
         
         self.chat_history.clear()
         self.log_system(f"📁 Проект успешно загружен: {os.path.basename(new_path)}", color="#31a24c", is_bold=True)
-        self.log_system("🚨 ВНИМАНИЕ: Если вы работаете через Browser-режим, обязательно откройте НОВЫЙ ЧАТ в Gemini, чтобы сбросить контекст старых файлов!", color="#ffaa00", is_bold=True)
-        
         self._check_project_environment()
         self._load_recent_chat_history()
 

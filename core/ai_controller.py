@@ -108,6 +108,21 @@ class AIController(QObject):
     def estimate_tokens(self, text):
         return int(len(text) / 2.5)
 
+    # ---> ДОБАВЛЕНА ФУНКЦИЯ ДЛЯ ПЕРЕХВАТА DRAG-AND-DROP <---
+    def register_drag_task(self, full_prompt):
+        """Активирует радар в IDE для перехвата ответа при ручном Drag-and-Drop"""
+        self.current_trace_id = str(uuid.uuid4())[:12]
+        self.agent_trace = [{"title": "Исходный запрос (Hybrid Drag)", "content": full_prompt}]
+        self._save_current_trace()
+        
+        self.retry_count = 0
+        self.auto_heal_attempts = 0
+        self.last_tool_result_hash = None
+        self.last_tool_name = None
+        self.browser_mcp_step = 0
+        
+        self.mw.log_system("📡 Радар IDE активирован. Ожидание ответа от браузера...")
+
     def handle_terminal_error(self, error_text):
         engine_data = self.mw.get_selected_engine_data()
         is_browser = engine_data.get("provider_id", "Browser") == "Browser"
