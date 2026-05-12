@@ -39,6 +39,7 @@ class VibeBridge:
         
         self.on_result_received = None
         self.on_limit_reached = None
+        self.on_log_received = None  # КРИТИЧЕСКИЙ ФИКС: Коллбэк для логов телеметрии
         
         self.is_paused = False
         self.active_tabs = {}
@@ -101,6 +102,16 @@ class VibeBridge:
             if self.on_limit_reached:
                 self.on_limit_reached()
             return jsonify({"status": "success"})
+
+        # КРИТИЧЕСКИЙ ФИКС: Эндпоинт для приема логов из расширения (Чанки vs Paste)
+        @self.app.route('/log', methods=['POST'])
+        def receive_log():
+            data = request.json
+            if data and "message" in data:
+                if self.on_log_received:
+                    self.on_log_received(data["message"], data.get("color", ""))
+                return jsonify({"status": "success"})
+            return jsonify({"status": "error"}), 400
 
     # ---> ДОБАВЛЕН ПАРАМЕТР IMAGES <---
     def add_task(self, prompt, is_relay=False, target_id=None, images=None):

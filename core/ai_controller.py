@@ -17,6 +17,7 @@ from core.context_builder import ContextBuilder
 class AIController(QObject):
     ai_response_signal = pyqtSignal(str)
     limit_reached_signal = pyqtSignal()
+    bridge_log_signal = pyqtSignal(str, str) # КРИТИЧЕСКИЙ ФИКС: Сигнал для логов (сообщение, цвет)
 
     def __init__(self, main_window):
         super().__init__()
@@ -27,12 +28,15 @@ class AIController(QObject):
         self.mcp_manager = MCPManager(self.mw.project_path)
         self.context_builder = ContextBuilder(self) 
         
+        # Привязка коллбэков моста к потокобезопасным сигналам Qt
         self.bridge.on_result_received = lambda text: self.ai_response_signal.emit(text)
         self.bridge.on_limit_reached = lambda: self.limit_reached_signal.emit()
+        self.bridge.on_log_received = lambda msg, color="": self.bridge_log_signal.emit(msg, color)
         
         # --- ФИКС: СВЯЗЫВАЕМ СИГНАЛЫ С ФУНКЦИЯМИ ОБРАБОТКИ ---
         self.ai_response_signal.connect(self.process_ai_response)
         self.limit_reached_signal.connect(self.process_limit_reached)
+        self.bridge_log_signal.connect(self.process_bridge_log)
         # ---------------------------------------------------
         
         self.retry_count = 0
@@ -48,6 +52,14 @@ class AIController(QObject):
         self.auto_heal_attempts = 0
         self.last_tool_result_hash = None
         self.last_tool_name = None
+
+    # =========================================================
+    # ОБРАБОТКА ЛОГОВ ТЕЛЕМЕТРИИ
+    # =========================================================
+    def process_bridge_log(self, msg, color):
+        """Безопасно выводит лог из фонового потока Flask в GUI"""
+        real_color = color if color else None
+        self.mw.log_system(msg, color=real_color)
 
     # =========================================================
     # ДОЛГОСРОЧНАЯ ПАМЯТЬ ИНСПЕКТОРА (TTL 7 ДНЕЙ)
@@ -329,7 +341,6 @@ class AIController(QObject):
         self.mw.chat_history.append(f"<br><div style='color: #858585; font-size: 13px; margin-left: 10px;'>[СИСТЕМА] Автоматически отправлен код: {', '.join(file_paths)}</div>")
         self.mw.scroll_chat()
 
-        # Собираем код файлов в явные текстовые блоки
         marker = '`' * 3
         attached_blocks = []
         for path in file_paths:
@@ -339,7 +350,6 @@ class AIController(QObject):
             else:
                 attached_blocks.append(f"### ФАЙЛ: {path} ###\n[ФАЙЛ НЕ НАЙДЕН ИЛИ ПУСТ]")
 
-        # Формируем жесткий текстовый промпт со вшитым кодом
         system_text = (
             "[СИСТЕМНОЕ СООБЩЕНИЕ: ПОЛЬЗОВАТЕЛЬ ПРЕДОСТАВИЛ ЗАПРОШЕННЫЕ ФАЙЛЫ]\n"
             "Ниже представлен исходный код запрошенных файлов.\n"
@@ -354,10 +364,8 @@ class AIController(QObject):
             self.mw.update_status_bar()
             self.retry_count = 0
 
-            # КРИТИЧЕСКИ ВАЖНО: Отправляем задачу как обычный текст (images=[]), 
-            # content.js вставит этот гигантский текст чанками без зависаний!
             self.bridge.add_task(self.mw.last_full_prompt, target_id=self.mw.get_current_target_id(), images=[])
-            self.mw.log_system("Текст файлов отправлен в чат (чанкованная вставка). Ожидание ответа...")
+            self.mw.log_system("Текст файлов отправлен в чат. Ожидание ответа...")
         else:
             self.mw.last_full_prompt = self.orchestrator.format_request(user_prompt=system_text, project_path=self.mw.project_path, current_file_path=self.mw.current_file_path, file_content="")
             self.mw.tokens_sent += self.estimate_tokens(self.mw.last_full_prompt)
