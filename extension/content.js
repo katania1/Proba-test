@@ -1,13 +1,11 @@
 /**
- * 📖 БИБЛИЯ ПРОЕКТА: CONTENT.JS (v6.7 ULTIMATE HYBRID)
+ * 📖 БИБЛИЯ ПРОЕКТА: CONTENT.JS (v6.9 ULTIMATE HYBRID)
  *
- * КЛЮЧЕВЫЕ ИЗМЕНЕНИЯ v6.7:
- * [1] АВТО-РАДАР РУЧНЫХ ЗАДАЧ — если скрипт видит, что началась генерация (крутится спиннер), 
- * но задачи от сервера не поступало, он автоматически берет эту генерацию на контроль 
- * и перехватывает результат (идеально для Drag-and-Drop + Ctrl+V).
- * [2] ОТКЛЮЧЕНИЕ ДВОЙНОГО КЛИКА — код Секции 10 деактивирован, чтобы исключить медленные 
- * JS-инъекции. Теперь мы полагаемся исключительно на мгновенный нативный Ctrl+V ОС.
- * [3] ХАРДКОРНЫЙ ПАРСИНГ — сохранено жесткое форматирование списков и Markdown.
+ * КЛЮЧЕВЫЕ ИЗМЕНЕНИЯ v6.9:
+ * [1] ЕДИНЫЙ ТАЙМАУТ: 120 секунд для всех режимов (защита от долгого Thinking Gemini).
+ * [2] ЖЕСТКИЙ РАДАР (___RADAR_MODE___): безупречный перехват Drag-n-Drop.
+ * [3] FAILSAFE СБРОС: таймер стартует только при получении задачи, исключая залипания.
+ * [4] ОПТИМИЗАЦИЯ REFLOW: проверка лимитов больше не вешает браузер.
  */
 
 // ==========================================================
@@ -24,6 +22,8 @@ window.ignoreLimitsSession = false;
 window.textBeforeSend = "";
 window.waitingForNewBubble = false;
 window.waitStartTime = 0;
+window.isRadarMode = false;
+window.processingStartTime = 0;
 
 const SERVER_URL = "http://localhost:5070";
 let isProcessing = false;
@@ -80,7 +80,6 @@ function clearContentEditable(el) {
     } else {
         el.focus();
         try {
-            // Безопасное удаление через Range API для сохранения структуры state.doc
             const range = document.createRange();
             range.selectNodeContents(el);
             const sel = window.getSelection();
@@ -109,10 +108,8 @@ class TurboTextInjector {
 
         for (let i = 0; i < chunks.length; i++) {
             await this._yieldThread();
-
             document.execCommand('insertText', false, chunks[i]);
             element.dispatchEvent(new Event('input', { bubbles: true }));
-
             injected += chunks[i].length;
             this.onProgress(injected / text.length);
         }
@@ -162,7 +159,6 @@ async function insertLargeTextChunked(inputArea, text) {
 
     const statusSpan = document.getElementById('vibe-status');
 
-    // --- ПУТЬ 1: Мгновенный Fast-Track для легких запросов (<= 4 КБ) ---
     if (text.length <= 4000) {
         console.log('VibeCoder: Объем <= 4КБ. Прямой инжект...');
         document.execCommand('insertText', false, text);
@@ -174,7 +170,6 @@ async function insertLargeTextChunked(inputArea, text) {
         return;
     }
 
-    // --- ПУТЬ 2: Плавная загрузка безопасными блоками для тяжелых задач (> 4 КБ) ---
     console.log('VibeCoder: Объем > 4КБ. Запуск анти-фриз инжектора...');
     sendLog('⚡ Загрузка объемного контекста безопасными блоками...', '#bb86fc');
 
@@ -268,7 +263,7 @@ function resetChat() {
         'a[data-test-id="new-chat-button"], a[href^="/app"], button[aria-label*="New chat" i], button[aria-label*="Новый чат" i]'
     );
     if (newChatBtn) newChatBtn.click();
-    else window.location.href = "https://gemini.google.com/app";
+    else window.location.href = "[https://gemini.google.com/app](https://gemini.google.com/app)";
 }
 
 async function triggerLimitReached(reason) {
@@ -281,18 +276,17 @@ async function triggerLimitReached(reason) {
 
 async function checkGeminiAlerts() {
     if (window.ignoreLimitsSession) return false;
-    const bodyText = (document.body.innerText || "").toLowerCase();
+    
+    // Оптимизация reflow: проверяем только всплывающие алерты, а не весь body
+    const alertZone = document.querySelector('snack-bar-container, .toast-container, [role="alert"], .error-message, .limit-message');
+    const bodyText = (alertZone && alertZone.innerText ? alertZone.innerText : "").toLowerCase();
+    
     if (bodyText.includes("you've reached your pro model limit") ||
         bodyText.includes("limit resets on") ||
-        bodyText.includes("лимит запросов исчерпан")) {
-        await triggerLimitReached("Текст лимита на странице"); return true;
-    }
-    const alerts = document.querySelectorAll('snack-bar, .error-message, [role="alert"], .limit-message');
-    for (const el of alerts) {
-        const t = (el.innerText || "").toLowerCase();
-        if (t.includes("limit") || t.includes("лимит") || t.includes("upgrade")) {
-            await triggerLimitReached(t); return true;
-        }
+        bodyText.includes("лимит запросов исчерпан") ||
+        bodyText.includes("upgrade")) {
+        await triggerLimitReached(bodyText); 
+        return true;
     }
     return false;
 }
@@ -360,10 +354,6 @@ function base64ToFile(b64, mime, filename) {
     return new File([bytes], filename, { type: mime });
 }
 
-/**
- * [FIX-REVERSE] Интеллектуальное восстановление Markdown-разметки из DOM-дерева Gemini.
- * Создает изолированную копию узла ответа, находит блоки кода и жестко парсит списки и абзацы.
- */
 function getLastModelText() {
     const elements = Array.from(document.querySelectorAll('message-content'));
     const validContents = elements.filter(el =>
@@ -372,14 +362,13 @@ function getLastModelText() {
     
     if (validContents.length === 0) return "";
     
-    // Берем последний актуальный пузырь ответа
     const originalNode = validContents[validContents.length - 1];
-    
-    // Клонируем узел, чтобы наши манипуляции не сломали виртуальный DOM React в браузере
     const clone = originalNode.cloneNode(true);
     
-    // Находим все контейнеры исходного кода
     const preTags = Array.from(clone.querySelectorAll('pre'));
+    
+    // Безопасный маркер кавычек, чтобы не ломать парсеры чата (Канвас)
+    const bTick = String.fromCharCode(96) + String.fromCharCode(96) + String.fromCharCode(96);
     
     preTags.forEach(pre => {
         let lang = "";
@@ -400,12 +389,10 @@ function getLastModelText() {
         }
         
         const sourceCode = (pre.innerText || pre.textContent || "").trimEnd();
-        const mdFormattedNode = document.createTextNode(`\n\n\`\`\`${lang.toLowerCase()}\n${sourceCode}\n\`\`\`\n\n`);
+        const mdFormattedNode = document.createTextNode(`\n\n${bTick}${lang.toLowerCase()}\n${sourceCode}\n${bTick}\n\n`);
         wrapper.replaceWith(mdFormattedNode);
     });
     
-    // [FIX-RENDER v6.5] Хардкорная расстановка переносов без CSS-зависимостей браузера
-    // Явно конвертируем блочные элементы и списки в текстовые переносы внутри клона
     clone.querySelectorAll('br').forEach(br => br.replaceWith(document.createTextNode('\n')));
     
     clone.querySelectorAll('p, h1, h2, h3, h4, h5, h6').forEach(el => {
@@ -413,7 +400,6 @@ function getLastModelText() {
     });
     
     clone.querySelectorAll('li').forEach(el => {
-        // Вставляем маркер Markdown (*) в начало каждого пункта
         el.insertBefore(document.createTextNode('\n* '), el.firstChild);
         el.appendChild(document.createTextNode('\n'));
     });
@@ -422,10 +408,7 @@ function getLastModelText() {
         el.appendChild(document.createTextNode('\n'));
     });
 
-    // Теперь textContent безопасно извлечет все наши вставленные переносы
     let textTextText = clone.textContent || "";
-    
-    // Очищаем от невидимых символов и схлопываем множественные пустые строки (максимум 2)
     textTextText = textTextText.replace(/\u00A0/g, ' ').replace(/\u200B/g, '');
     textTextText = textTextText.replace(/\n\s*\n\s*\n/g, '\n\n'); 
     
@@ -452,7 +435,7 @@ function checkIsGenerating() {
 }
 
 // ==========================================================
-// 7. ЗАГРУЗКА ФАЙЛОВ (С АГРЕССИВНЫМ ДЕДЛАЙНОМ 3 СЕКУНДЫ)
+// 7. ЗАГРУЗКА ФАЙЛОВ
 // ==========================================================
 async function uploadFiles(filesPayload, inputArea) {
     if (!filesPayload || filesPayload.length === 0) return;
@@ -576,36 +559,63 @@ async function sendToGemini(text, filesPayload = []) {
 }
 
 // ==========================================================
-// 9. ГЛАВНЫЙ ОРКЕСТРАТОР
+// 9. ГЛАВНЫЙ ОРКЕСТРАТОР С ЖЕСТКИМ РАДАРОМ И ЗАЩИТОЙ
 // ==========================================================
 async function checkServer() {
-    if (isProcessing && !window.waitingForNewBubble) return;
+    // Failsafe: защищает от вечного зависания, если скрипт застрял без задачи
+    if (isProcessing && !window.waitingForNewBubble && !activeTaskId) {
+        if (Date.now() - window.processingStartTime > 20000) {
+            console.warn("VibeCoder: Failsafe — жесткий сброс зависания.");
+            isProcessing = false;
+            window.isRadarMode = false;
+            activeTaskId = null;
+        }
+        return;
+    }
 
     try {
         if (!isProcessing && !activeTaskId) {
             const data = await fetchGetProxy(`${SERVER_URL}/get_task?target_id=${encodeURIComponent(myTabId)}`);
             if (data.status === "success" && data.task) {
-                activeTaskId = data.task.id;
-                isProcessing = true;
-                lastServerState = "RUNNING";
-                updatePanelUI();
-                currentCandidateText = "";
-                stableCount = 0;
-                await sendToGemini(data.task.prompt, data.task.images);
-                return;
+                
+                // ТАЙМЕР ЗАЩИТЫ СТАРТУЕТ ТОЛЬКО ПРИ ПОЛУЧЕНИИ ЗАДАЧИ
+                window.processingStartTime = Date.now();
+                
+                if (data.task.prompt === "___RADAR_MODE___") {
+                    activeTaskId = "manual_drag_task_" + Date.now();
+                    isProcessing = true;
+                    lastServerState = "RUNNING";
+                    updatePanelUI();
+                    currentCandidateText = "";
+                    stableCount = 0;
+                    window.textBeforeSend = getLastModelText();
+                    window.waitingForNewBubble = true;
+                    window.waitStartTime = Date.now();
+                    window.isRadarMode = true;
+                    sendLog("📡 Радар на связи! Жду вашего нажатия Enter...", "#bb86fc");
+                    return;
+                } else {
+                    activeTaskId = data.task.id;
+                    isProcessing = true;
+                    lastServerState = "RUNNING";
+                    updatePanelUI();
+                    currentCandidateText = "";
+                    stableCount = 0;
+                    window.isRadarMode = false;
+                    await sendToGemini(data.task.prompt, data.task.images);
+                    return;
+                }
             }
 
-            // ---> НОВОЕ: ПАССИВНЫЙ РАДАР (ДЛЯ DRAG-AND-DROP) <---
-            // Если задачи от сервера нет, но мы видим, что ИИ начал писать 
-            // (пользователь нажал Enter вручную после Drag'a)
             if (checkIsGenerating()) {
+                window.processingStartTime = Date.now();
                 activeTaskId = "manual_drag_task_" + Date.now();
                 isProcessing = true;
                 lastServerState = "RUNNING"; 
                 updatePanelUI();
                 currentCandidateText = "";
                 stableCount = 0;
-                sendLog("📡 Засечена ручная генерация! Начинаем перехват ответа...", "#bb86fc");
+                sendLog("📡 Засечена внезапная ручная генерация! Начинаем перехват ответа...", "#bb86fc");
                 return;
             }
         }
@@ -620,10 +630,23 @@ async function checkServer() {
 
         if (window.waitingForNewBubble) {
             const elapsed = Date.now() - window.waitStartTime;
-            if (currentText !== window.textBeforeSend || elapsed > 15000) {
+            
+            // ВЕРНОЕ ВРЕМЯ ОЖИДАНИЯ: 120 секунд для ВСЕХ задач (и радар, и обычные)
+            const timeoutLimit = 120000; 
+
+            if (currentText !== window.textBeforeSend) {
+                window.waitingForNewBubble = false;
+                stableCount = 0;
+                // Теперь мы всегда пишем, что перехват пошел, независимо от режима!
+                sendLog("📡 Генерация пошла! Перехватываю ответ...", "#bb86fc");
+            } else if (elapsed > timeoutLimit) {
                 window.waitingForNewBubble = false;
                 isProcessing = false;
                 stableCount = 0;
+                activeTaskId = null;
+                sendLog("⏳ Таймаут ожидания ответа (2 мин). Перехват отменен.", "#ffaa00");
+                window.isRadarMode = false;
+                return;
             } else {
                 lastServerState = "RUNNING"; updatePanelUI(); return;
             }
@@ -648,6 +671,7 @@ async function checkServer() {
                 isProcessing = true;
                 lastServerState = "STOPPED"; updatePanelUI();
                 try {
+                    sendLog("📤 Чтение завершено, отправляю текст в IDE...", "#31a24c");
                     await fetchPostProxy(`${SERVER_URL}/post_result`, JSON.stringify({
                         task_id: activeTaskId, result: currentText, source_id: myTabId
                     }));
@@ -656,6 +680,7 @@ async function checkServer() {
                 } finally {
                     isProcessing = false;
                     activeTaskId = null;
+                    window.isRadarMode = false;
                 }
             } else {
                 lastServerState = "RUNNING"; updatePanelUI();
@@ -664,38 +689,13 @@ async function checkServer() {
             lastServerState = "RUNNING"; updatePanelUI();
         }
     } catch (e) {
-        lastServerState = "STOPPED"; updatePanelUI();
+        console.error("VibeCoder: Критическая ошибка в checkServer:", e);
+        isProcessing = false;
+        window.isRadarMode = false;
+        activeTaskId = null;
+        lastServerState = "STOPPED"; 
+        updatePanelUI();
     }
 }
 
-// Опрос сервера каждую секунду
 setInterval(checkServer, 1000);
-
-// ==========================================================
-// 10. ВИРТУАЛЬНЫЙ БУФЕР ОБМЕНА (ОТКЛЮЧЕН В v6.7)
-// ==========================================================
-// Мы намеренно отключили этот код двойного клика, так как программная вставка 
-// больших объемов текста через JavaScript вызывает зависание редактора Gemini.
-// В версии 6.7 мы полагаемся исключительно на нативную вставку Ctrl+V от самой ОС.
-/*
-document.addEventListener('dblclick', async (e) => {
-    const inputArea = document.querySelector('rich-textarea > div, div[contenteditable="true"][role="textbox"], textarea#prompt-textarea');
-    
-    // Если кликнули по полю ввода
-    if (inputArea && (e.target === inputArea || inputArea.contains(e.target))) {
-        try {
-            // Обращаемся к виртуальному буферу на сервере
-            const data = await fetchGetProxy(`${SERVER_URL}/get_clipboard`);
-            if (data && data.status === "success" && data.text) {
-                console.log("VibeCoder: 🎯 Виртуальный буфер получен. Вставляем текст...");
-                sendLog("📥 Вставка текста из виртуального буфера...", "#31a24c");
-                
-                // Вставляем безопасно, чтобы не подвесить браузер
-                await insertLargeTextChunked(inputArea, data.text);
-            }
-        } catch (err) {
-            console.warn("VibeCoder: Буфер пуст или сервер недоступен.");
-        }
-    }
-});
-*/
