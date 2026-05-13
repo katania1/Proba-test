@@ -1,23 +1,11 @@
 /**
- * 📖 БИБЛИЯ ПРОЕКТА: CONTENT.JS (v7.1 — DYNAMIC SESSION SYNC)
+ * 📖 БИБЛИЯ ПРОЕКТА: CONTENT.JS (v7.2 — ANTI-PHANTOM & HEAVY FILES EDITION)
  *
- * ИЗМЕНЕНИЯ v6.9 (сохранены):
- * [1] ЕДИНЫЙ ТАЙМАУТ: 120 секунд для всех режимов (защита от долгого Thinking Gemini).
- * [2] ЖЕСТКИЙ РАДАР (___RADAR_MODE___): безупречный перехват Drag-n-Drop.
- * [3] FAILSAFE СБРОС: таймер стартует только при получении задачи, исключая залипания.
- * [4] ОПТИМИЗАЦИЯ REFLOW: проверка лимитов больше не вешает браузер.
- * [5] FSM и детектор мутаций текста для устранения бесконечных циклов.
- *
- * ИСПРАВЛЕНИЯ v7.0 (сохранены):
- * [FIX-A] GenerationDetector.start() вызывается только после готовности UI.
- * [FIX-B] Рекурсивный поиск контейнера ответов без захвата document.body.
- * [FIX-C] Фильтрация мутаций строго по зоне ответа и игнорирование фазы INJECTING.
- * [FIX-D] Удалена устаревшая проверка скрытых кнопок "Stop".
- *
- * ИСПРАВЛЕНИЯ v7.1:
- * [FIX-E] Внедрена синхронизация с server_session_id бэкенда. При обнаружении
- * перезапуска Python-сервера (смена session_id) расширение мгновенно
- * сбрасывает локальный FSM в IDLE, гася вечную загрузку/генерацию на плашке.
+ * ИСПРАВЛЕНИЯ v7.2:
+ * [FIX-H] Бронебойная защита от фантомных пустых ответов при загрузке файлов: 
+ * Если пузырь пуст, FSM принудительно ждет начала генерации до 20 сек.
+ * [FIX-I] Обновлен детектор спиннеров для распознавания скелетных анимаций Gemini.
+ * [FIX-J] Подтверждено увеличение staleThreshold до 4000мс.
  */
 
 // ==========================================================
@@ -57,7 +45,6 @@ setInterval(() => {
     .then(resp => resp.json())
     .then(data => {
         if (data && data.server_session_id) {
-            // Фоновое обновление известной сессии
             if (!knownServerSessionId) {
                 knownServerSessionId = data.server_session_id;
             }
@@ -163,7 +150,7 @@ class TurboTextInjector {
 }
 
 // ==========================================================
-// 3. ГЛАВНАЯ ФУНКЦИЯ ВСТАВКИ (ПРЯМОЙ ОПТИМИЗИРОВАННЫЙ ПОТОК)
+// 3. ГЛАВНАЯ ФУНКЦИЯ ВСТАВКИ
 // ==========================================================
 async function insertLargeTextChunked(inputArea, text) {
     console.log(`VibeCoder: Подготовка промпта (${text.length} символов)...`);
@@ -221,7 +208,7 @@ class GenerationDetector {
         this.observer = null;
         this.isGenerating = false;
         this.lastMutationTime = 0;
-        this.staleThreshold = 4000; // 🔥 ИЗМЕНЕНО: Увеличено с 1500 до 4000 для тяжелых diff-файлов
+        this.staleThreshold = 4000; // 🔥 ВАЖНО: 4000мс защиты от фризов Gemini
         this._ticker = null;
     }
 
@@ -241,18 +228,14 @@ class GenerationDetector {
     _observeLastBubble() {
         if (this.observer) this.observer.disconnect();
 
-        // Поиск контейнера ответов без захвата глобального body
         const container = document.querySelector(
             'response-container, .response-container, [data-response-index], chat-history, .conversation-container'
         );
 
         if (!container) {
-            console.warn('VibeCoder: Контейнер ответов Gemini не найден, повторная попытка через 1с...');
             setTimeout(() => this._observeLastBubble(), 1000);
             return;
         }
-
-        console.log('VibeCoder: GenerationDetector подключён к', container.tagName || container.className);
 
         this.observer = new MutationObserver((mutations) => {
             if (typeof FSM !== 'undefined' && FSM.state === 'INJECTING') return;
@@ -314,7 +297,6 @@ function startDetectorWhenReady() {
         'response-container, chat-history, .conversation-container, model-response'
     );
     if (geminiReady) {
-        console.log('VibeCoder: Gemini UI готов, запускаю GenerationDetector.');
         generationDetector.start();
     } else {
         setTimeout(startDetectorWhenReady, 800);
@@ -327,7 +309,6 @@ if (document.readyState === 'complete') {
     window.addEventListener('load', () => setTimeout(startDetectorWhenReady, 1500));
 }
 
-// Конечный автомат для строгого контроля состояний и предотвращения петель
 const FSM = {
     IDLE: 'IDLE',               
     INJECTING: 'INJECTING',     
@@ -351,7 +332,6 @@ const FSM = {
             POSTING:        ['IDLE'],
         };
         if (!allowed[this._state]?.includes(newState)) {
-            console.warn(`FSM: Запрещённый переход ${this._state} → ${newState}, игнорирую.`);
             return false;
         }
         console.log(`FSM: ${this._state} → ${newState}`);
@@ -427,7 +407,7 @@ setTimeout(createVibeBadge, 1500);
 function updatePanelUI() {
     const statusSpan = document.getElementById('vibe-status');
     if (!statusSpan) return;
-    if (statusSpan.innerText.includes('Вставка')) return;
+    if (FSM.state === 'INJECTING' && statusSpan.innerText.includes('Вставка')) return;
     if (isLimitReached && !window.ignoreLimitsSession) {
         statusSpan.innerText = '🛑 ЛИМИТЫ'; statusSpan.style.background = '#ff4444'; return;
     }
@@ -465,7 +445,6 @@ function resetChat() {
 
 async function triggerLimitReached(reason) {
     if (isLimitReached) return;
-    console.warn(`VibeCoder: Лимит. Причина: ${reason}`);
     isLimitReached = true;
     updatePanelUI();
     fetchPostProxy(`${SERVER_URL}/limit_reached`, JSON.stringify({ source_id: myTabId })).catch(() => {});
@@ -609,31 +588,45 @@ function getLastModelText() {
     return textTextText.trim();
 }
 
+// 🔥 ИСПРАВЛЕНИЕ: Бронебойный детектор генерации
 function checkIsGenerating() {
     if (generationDetector.check()) return true;
 
-    // Ограничиваем поиск спиннеров строго активной зоной текущего чата
-    const chatArea = document.querySelector('chat-window, .main-content, #chat-history');
+    const chatArea = document.querySelector('chat-window, .main-content, #chat-history, .conversation-container');
     if (!chatArea) return false;
 
-    const activeResponses = chatArea.querySelectorAll('model-response');
+    const activeResponses = chatArea.querySelectorAll('model-response, message-content');
     if (activeResponses.length > 0) {
         const last = activeResponses[activeResponses.length - 1];
         
-        // Игнорируем завершенные блоки и элементы из левой панели навигации
         if (last.classList.contains('completed') || 
             last.hasAttribute('data-loading', 'false') ||
             last.closest('side-navigation-v2, mat-sidenav, .bots-list-container')) {
             return false;
         }
 
-        const spinner = last.querySelector('mat-progress-spinner, .gmat-mdc-progress-spinner, mat-spinner');
+        // Проверяем явные атрибуты загрузки Gemini
+        if (last.hasAttribute('is-loading') || 
+            last.getAttribute('data-loading') === 'true' || 
+            last.classList.contains('is-loading')) {
+            return true;
+        }
+
+        // Ищем спиннеры и скелетные анимации (Thinking)
+        const spinner = last.querySelector('mat-progress-spinner, .gmat-mdc-progress-spinner, mat-spinner, [class*="spinner"], [class*="loading"], [class*="Thinking"], [class*="skeleton"]');
         if (spinner) {
             const style = window.getComputedStyle(spinner);
             if (spinner.offsetWidth > 0 && spinner.offsetHeight > 0 &&
                 style.display !== 'none' && style.opacity !== '0' && style.visibility !== 'hidden') {
                 return true;
             }
+        }
+        
+        // 🔥 ЗАЩИТА ОТ ПУСТОГО ПУЗЫРЯ:
+        // Если контейнер создан, но текста в нем ноль (и нет форматирования) - 
+        // ИИ сейчас переваривает файлы (Thinking phase). Считаем, что генерация идет!
+        if (!last.textContent.trim() && !last.querySelector('pre, code, p, span')) {
+            return true; 
         }
     }
     return false;
@@ -720,9 +713,7 @@ async function sendToGemini(text, filesPayload = []) {
     await insertLargeTextChunked(inputArea, text);
 
     const fieldSnapshot = (inputArea.innerText || inputArea.value || '').substring(0, 200);
-    console.log(`VibeCoder: Содержимое поля перед Send:\n"${fieldSnapshot}"`);
     if (!fieldSnapshot.trim()) {
-        console.error('VibeCoder: ⚠️ ПОЛЕ ПУСТОЕ! Отправка прервана.');
         sendLog('❌ Поле ввода пустое перед отправкой. Задача не выполнена.', '#ff4444');
         FSM.reset();
         isProcessing = false;
@@ -746,7 +737,6 @@ async function sendToGemini(text, filesPayload = []) {
         if (sendBtn && !sendBtn.disabled && sendBtn.getAttribute('aria-disabled') !== 'true') {
             sendBtn.click();
             sent = true;
-            console.log('VibeCoder: ✅ Send нажат.');
             break;
         }
         await new Promise(r => setTimeout(r, 150));
@@ -756,11 +746,8 @@ async function sendToGemini(text, filesPayload = []) {
         const fallback = document.querySelector(
             '[data-testid="send-button"], .send-button, button[aria-label*="send" i], button[aria-label*="отправить" i]'
         );
-        if (fallback) {
-            fallback.click();
-            console.log('VibeCoder: Send через fallback.');
-        } else {
-            console.error('VibeCoder: Кнопка Send не найдена!');
+        if (fallback) fallback.click();
+        else {
             sendLog('❌ Кнопка Send не найдена!', '#ff4444');
             window.waitingForNewBubble = false;
             FSM.reset();
@@ -774,9 +761,7 @@ async function sendToGemini(text, filesPayload = []) {
 // 9. ГЛАВНЫЙ ОРКЕСТРАТОР С ЖЕСТКИМ РАДАРОМ И ЗАЩИТОЙ (FSM)
 // ==========================================================
 async function checkServer() {
-    // Глобальный Failsafe предохранитель
-    if (FSM.state !== 'IDLE' && FSM.elapsed() > 90000) {
-        console.error(`FSM: Таймаут в состоянии ${FSM.state}. Принудительный сброс.`);
+    if (FSM.state !== 'IDLE' && FSM.elapsed() > 120000) {
         sendLog(`⏰ Таймаут ${FSM.state}. Сброс.`, '#ff4444');
         FSM.reset();
         isProcessing = false;
@@ -789,15 +774,11 @@ async function checkServer() {
         switch (FSM.state) {
 
             case 'IDLE': {
-                // Добавляем передачу текущей известной сессии в параметры запроса
                 const sessionParam = knownServerSessionId ? `&session_id=${encodeURIComponent(knownServerSessionId)}` : '';
                 const data = await fetchGetProxy(`${SERVER_URL}/get_task?target_id=${encodeURIComponent(myTabId)}${sessionParam}`);
                 
                 if (data && data.status) {
-                    // [FIX-E] Проверка консистентности сессии: если бэкенд отдал новый session_id,
-                    // значит Python-сервер был перезапущен. Сбрасываем все активные процессы.
                     if (data.server_session_id && knownServerSessionId && data.server_session_id !== knownServerSessionId) {
-                        console.warn(`VibeCoder: Обнаружен перезапуск бэкенда (смена сессии: ${knownServerSessionId} -> ${data.server_session_id}). Сброс автомата.`);
                         knownServerSessionId = data.server_session_id;
                         FSM.reset();
                         isProcessing = false;
@@ -806,7 +787,6 @@ async function checkServer() {
                         return;
                     }
 
-                    // Первичная фиксация сессии
                     if (data.server_session_id && !knownServerSessionId) {
                         knownServerSessionId = data.server_session_id;
                     }
@@ -878,15 +858,6 @@ async function checkServer() {
             }
 
             case 'READING': {
-                if (FSM.elapsed() > 120000) {
-                    sendLog("⚠️ Чтение затянулось или зависло. Сброс.", "#ffaa00");
-                    FSM.reset();
-                    isProcessing = false;
-                    activeTaskId = null;
-                    window.isRadarMode = false;
-                    return;
-                }
-
                 checkGeminiAlerts().catch(() => {});
 
                 const isGen = checkIsGenerating();
@@ -896,6 +867,14 @@ async function checkServer() {
                 if (isGen) {
                     stableCount = 0;
                     currentCandidateText = diffText;
+                    updatePanelUI();
+                    return;
+                }
+
+                // 🔥 ФИНАЛЬНАЯ ЗАЩИТА: Если текст пустой, а с момента начала чтения
+                // прошло меньше 20 секунд — мы принудительно ждем (ИИ читает файлы).
+                if (diffText === "" && FSM.elapsed() < 20000) {
+                    stableCount = 0;
                     updatePanelUI();
                     return;
                 }

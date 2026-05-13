@@ -110,6 +110,18 @@ class AIOrchestrator:
                 data["thoughts"] = (thoughts + "\n\n" + extra_text).strip()
             # ------------------------------------------------------------
 
+            # --- ФИКС ВСЕЯДНОГО ПАРСЕРА: СБОР НЕСТАНДАРТНЫХ ТЕКСТОВЫХ ПОЛЕЙ ---
+            standard_keys = {"thoughts", "request_files", "create_files", "updates"}
+            extra_thoughts = []
+            for k, v in data.items():
+                if k not in standard_keys and isinstance(v, str) and v.strip():
+                    extra_thoughts.append(f"**[{k.upper()}]**:\n{v}")
+            
+            if extra_thoughts:
+                combined_extra = "\n\n".join(extra_thoughts)
+                data["thoughts"] = (data.get("thoughts", "") + "\n\n" + combined_extra).strip()
+            # ------------------------------------------------------------------
+
             if "thoughts" not in data and "updates" not in data and "create_files" not in data:
                 dump = json.dumps(data, ensure_ascii=False, indent=2)
                 data["thoughts"] = f"⚠️ **Внимание: ИИ выдал нестандартный JSON:**\n{marker}json\n{dump}\n{marker}"

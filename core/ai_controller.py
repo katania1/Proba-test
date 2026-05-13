@@ -317,23 +317,39 @@ class AIController(QObject):
             self.process_limit_reached()
             return
 
+        if self.is_waiting_for_relay_msg:
+            self.is_waiting_for_relay_msg = False
+            self.retry_count = 0
+            self.mw.tokens_received += self.estimate_tokens(raw_text)
+            self.mw.update_status_bar()
+
+            ai_summary = self.orchestrator.extract_thoughts_robustly(raw_text)
+            if not ai_summary:
+                self.mw.show_popup("Ошибка Эстафеты", "ИИ не смог собрать пакет.\nПридется переносить историю вручную.", is_error=True)
+                return
+
+            mega_prompt = self.prompt_service.build_relay_mega_prompt(ai_summary)
+
+            clipboard = QApplication.clipboard()
+            clipboard.setText(mega_prompt)
+
+            self.mw.chat_history.append("<span style='color: #31a24c;'><b>[СИСТЕМА] Транзитный пакет успешно скопирован в буфер обмена!</b></span>")
+            if hasattr(self.mw, 'chat_handler'):
+                self.mw.chat_handler.scroll_chat()
+            else:
+                self.mw.scroll_chat()
+            self.mw.show_popup("Эстафета готова!", "Мега-промпт успешно скопирован в буфер обмена!\n\nВставьте его в новый чат Gemini.")
+            return
+
         if self.is_waiting_for_commit_msg:
             self.is_waiting_for_commit_msg = False
             self.retry_count = 0
             self.mw.tokens_received += self.estimate_tokens(raw_text)
             self.mw.update_status_bar()
 
-            # 🔥 ИЗМЕНЕНО: Берем сырой текст, минуя JSON-парсер
-            commit_msg = raw_text.strip()
-            
-            # Очистка от маркдаун обертки, если ИИ всё же обернул ответ в ```markdown
-            if commit_msg.startswith("```"):
-                lines = commit_msg.split('\n')
-                if len(lines) > 2:
-                    commit_msg = '\n'.join(lines[1:-1]).strip()
-
+            commit_msg = self.orchestrator.extract_thoughts_robustly(raw_text)
             if not commit_msg:
-                commit_msg = "Автоматический коммит (не удалось получить ответ от ИИ)"
+                commit_msg = "Автоматический коммит (не удалось распарсить ответ ИИ)"
 
             safe_msg = commit_msg.replace('<', '&lt;').replace('>', '&gt;').replace('\n', '<br>')
             self.mw.chat_history.append(f"<br><span style='color: #4CAF50;'><b>[ИИ-Коммит]:</b><br>{safe_msg}</span>")
@@ -344,14 +360,12 @@ class AIController(QObject):
             else:
                 self.mw.scroll_chat()
 
-            # 🔥 ИЗМЕНЕНО: Исправлен вызов open_git_dialog (через git_workflow)
             if hasattr(self.mw, 'current_git_dialog') and self.mw.current_git_dialog and self.mw.current_git_dialog.isVisible():
                 self.mw.current_git_dialog.text_input.setPlainText(commit_msg)
                 self.mw.current_git_dialog.btn_ai.setText("✨ Сгенерировать ИИ-описание")
                 self.mw.current_git_dialog.btn_ai.setEnabled(True)
             else:
-                # Безопасное открытие окна, если оно было закрыто
-                self.mw.git_workflow.open_git_dialog(prefill_msg=commit_msg)
+                self.mw.open_git_dialog(prefill_msg=commit_msg)
             return
 
         self.mw.tokens_received += self.estimate_tokens(raw_text)
@@ -372,18 +386,13 @@ class AIController(QObject):
             self.mcp_handler.handle_tool_command(command)
             return
 
-        # === НАЧАЛО: ГРЯЗНЫЙ ПЫЛЕСОС ===
-        cleaned_text = raw_text
-        start_json = cleaned_text.find('{')
-        end_json = cleaned_text.rfind('}')
-        if start_json != -1 and end_json != -1 and end_json >= start_json:
-            cleaned_text = cleaned_text[start_json:end_json+1]
-        # === КОНЕЦ: ГРЯЗНЫЙ ПЫЛЕСОС ===
-
-        result = self.orchestrator.parse_and_validate_response(cleaned_text)
+        # Передаем оригинальный сырой текст напрямую в парсер,
+        # без предварительной обрезки "грязным пылесосом"
+        result = self.orchestrator.parse_and_validate_response(raw_text)
 
         if result["status"] == "error":
-            if "\"updates\":" not in cleaned_text and "\"create_files\":" not in cleaned_text:
+            # Если парсер не нашел обязательных полей кодинга, считаем это обычным чатом
+            if "\"updates\":" not in raw_text and "\"create_files\":" not in raw_text:
                 formatted_thoughts = self.orchestrator.markdown_to_html(raw_text.strip())
                 self.mw.chat_history.append(f"<div style='margin-top: 10px; margin-bottom: 10px;'><b style='color: #31a24c;'>[ОТВЕТ ИИ]:</b><br>{formatted_thoughts}</div>")
 
