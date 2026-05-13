@@ -260,6 +260,9 @@ class MainWindow(QMainWindow):
         self.btn_git = self.bottom_panel.btn_git
         self.btn_git.clicked.connect(self.git_workflow.open_git_dialog)
         
+        # --- ПРОБРОС КНОПКИ RAG ДЛЯ КОНТРОЛЛЕРА ---
+        self.btn_rag = self.bottom_panel.btn_rag
+        
         self.bottom_panel.btn_attach.clicked.connect(self.open_attachment_dialog)
         self.btn_pause.clicked.connect(self.toggle_pause)
         self.bottom_panel.btn_history.clicked.connect(self.show_history)

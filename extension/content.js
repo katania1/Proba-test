@@ -1,11 +1,23 @@
 /**
- * 📖 БИБЛИЯ ПРОЕКТА: CONTENT.JS (v6.9 ULTIMATE HYBRID)
+ * 📖 БИБЛИЯ ПРОЕКТА: CONTENT.JS (v7.1 — DYNAMIC SESSION SYNC)
  *
- * КЛЮЧЕВЫЕ ИЗМЕНЕНИЯ v6.9:
+ * ИЗМЕНЕНИЯ v6.9 (сохранены):
  * [1] ЕДИНЫЙ ТАЙМАУТ: 120 секунд для всех режимов (защита от долгого Thinking Gemini).
  * [2] ЖЕСТКИЙ РАДАР (___RADAR_MODE___): безупречный перехват Drag-n-Drop.
  * [3] FAILSAFE СБРОС: таймер стартует только при получении задачи, исключая залипания.
  * [4] ОПТИМИЗАЦИЯ REFLOW: проверка лимитов больше не вешает браузер.
+ * [5] FSM и детектор мутаций текста для устранения бесконечных циклов.
+ *
+ * ИСПРАВЛЕНИЯ v7.0 (сохранены):
+ * [FIX-A] GenerationDetector.start() вызывается только после готовности UI.
+ * [FIX-B] Рекурсивный поиск контейнера ответов без захвата document.body.
+ * [FIX-C] Фильтрация мутаций строго по зоне ответа и игнорирование фазы INJECTING.
+ * [FIX-D] Удалена устаревшая проверка скрытых кнопок "Stop".
+ *
+ * ИСПРАВЛЕНИЯ v7.1:
+ * [FIX-E] Внедрена синхронизация с server_session_id бэкенда. При обнаружении
+ * перезапуска Python-сервера (смена session_id) расширение мгновенно
+ * сбрасывает локальный FSM в IDLE, гася вечную загрузку/генерацию на плашке.
  */
 
 // ==========================================================
@@ -29,9 +41,11 @@ const SERVER_URL = "http://localhost:5070";
 let isProcessing = false;
 let currentCandidateText = "";
 let stableCount = 0;
-let lastServerState = "STOPPED";
 let activeTaskId = null;
 let isLimitReached = false;
+
+// Глобальное хранилище идентификатора серверной сессии
+let knownServerSessionId = null;
 
 // Пульс (Heartbeat) для поддержания связи с сервером Flask
 setInterval(() => {
@@ -39,7 +53,17 @@ setInterval(() => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ tab_id: myTabId, tab_name: myTabName })
-    }).catch(() => {});
+    })
+    .then(resp => resp.json())
+    .then(data => {
+        if (data && data.server_session_id) {
+            // Фоновое обновление известной сессии
+            if (!knownServerSessionId) {
+                knownServerSessionId = data.server_session_id;
+            }
+        }
+    })
+    .catch(() => {});
 }, 2000);
 
 // ==========================================================
@@ -190,6 +214,165 @@ async function insertLargeTextChunked(inputArea, text) {
 }
 
 // ==========================================================
+// 3.5. ДЕТЕКТОР ГЕНЕРАЦИИ И КОНЕЧНЫЙ АВТОМАТ (FSM)
+// ==========================================================
+class GenerationDetector {
+    constructor() {
+        this.observer = null;
+        this.isGenerating = false;
+        this.lastMutationTime = 0;
+        this.staleThreshold = 4000; // 🔥 ИЗМЕНЕНО: Увеличено с 1500 до 4000 для тяжелых diff-файлов
+        this._ticker = null;
+    }
+
+    start() {
+        this._observeLastBubble();
+        this._ticker = setInterval(() => {
+            if (this.isGenerating) {
+                const silence = Date.now() - this.lastMutationTime;
+                if (silence > this.staleThreshold) {
+                    this.isGenerating = false;
+                    updatePanelUI();
+                }
+            }
+        }, 300);
+    }
+
+    _observeLastBubble() {
+        if (this.observer) this.observer.disconnect();
+
+        // Поиск контейнера ответов без захвата глобального body
+        const container = document.querySelector(
+            'response-container, .response-container, [data-response-index], chat-history, .conversation-container'
+        );
+
+        if (!container) {
+            console.warn('VibeCoder: Контейнер ответов Gemini не найден, повторная попытка через 1с...');
+            setTimeout(() => this._observeLastBubble(), 1000);
+            return;
+        }
+
+        console.log('VibeCoder: GenerationDetector подключён к', container.tagName || container.className);
+
+        this.observer = new MutationObserver((mutations) => {
+            if (typeof FSM !== 'undefined' && FSM.state === 'INJECTING') return;
+
+            const hasTextChange = mutations.some(m => {
+                if (m.type === 'attributes') return false;
+
+                const inResponseZone = m.target.closest?.(
+                    'message-content, model-response, .response-text, ms-chat-message'
+                );
+                if (!inResponseZone) return false;
+
+                if (m.target.nodeType === Node.ELEMENT_NODE) {
+                    const style = window.getComputedStyle(m.target);
+                    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+                    if (m.target.offsetWidth === 0 && m.target.offsetHeight === 0) return false;
+                }
+
+                if (m.type === 'childList' && m.addedNodes.length > 0) {
+                    return Array.from(m.addedNodes).some(node =>
+                        node.nodeType === Node.TEXT_NODE ||
+                        (node.nodeType === Node.ELEMENT_NODE &&
+                         node.closest('message-content, model-response, .response-text'))
+                    );
+                }
+
+                return m.type === 'characterData';
+            });
+
+            if (hasTextChange) {
+                this.isGenerating = true;
+                this.lastMutationTime = Date.now();
+                updatePanelUI();
+            }
+        });
+
+        this.observer.observe(container, {
+            childList: true,
+            subtree: true,
+            characterData: true,
+            characterDataOldValue: false
+        });
+    }
+
+    check() {
+        return this.isGenerating;
+    }
+
+    destroy() {
+        if (this.observer) this.observer.disconnect();
+        if (this._ticker) clearInterval(this._ticker);
+    }
+}
+
+const generationDetector = new GenerationDetector();
+
+function startDetectorWhenReady() {
+    const geminiReady = document.querySelector(
+        'response-container, chat-history, .conversation-container, model-response'
+    );
+    if (geminiReady) {
+        console.log('VibeCoder: Gemini UI готов, запускаю GenerationDetector.');
+        generationDetector.start();
+    } else {
+        setTimeout(startDetectorWhenReady, 800);
+    }
+}
+
+if (document.readyState === 'complete') {
+    setTimeout(startDetectorWhenReady, 1500);
+} else {
+    window.addEventListener('load', () => setTimeout(startDetectorWhenReady, 1500));
+}
+
+// Конечный автомат для строгого контроля состояний и предотвращения петель
+const FSM = {
+    IDLE: 'IDLE',               
+    INJECTING: 'INJECTING',     
+    WAITING_BUBBLE: 'WAITING_BUBBLE', 
+    READING: 'READING',         
+    POSTING: 'POSTING',         
+
+    _state: 'IDLE',
+    _taskId: null,
+    _enteredAt: Date.now(),
+    _snapshotBeforeSend: '',
+
+    get state() { return this._state; },
+
+    transition(newState) {
+        const allowed = {
+            IDLE:           ['INJECTING', 'WAITING_BUBBLE', 'READING'], 
+            INJECTING:      ['WAITING_BUBBLE', 'IDLE'], 
+            WAITING_BUBBLE: ['READING', 'IDLE'],        
+            READING:        ['POSTING', 'READING', 'IDLE'],
+            POSTING:        ['IDLE'],
+        };
+        if (!allowed[this._state]?.includes(newState)) {
+            console.warn(`FSM: Запрещённый переход ${this._state} → ${newState}, игнорирую.`);
+            return false;
+        }
+        console.log(`FSM: ${this._state} → ${newState}`);
+        this._state = newState;
+        this._enteredAt = Date.now();
+        updatePanelUI();
+        return true;
+    },
+
+    elapsed() { return Date.now() - this._enteredAt; },
+
+    reset(taskId = null) {
+        this._state = 'IDLE';
+        this._taskId = taskId;
+        this._enteredAt = Date.now();
+        this._snapshotBeforeSend = '';
+        updatePanelUI();
+    }
+};
+
+// ==========================================================
 // 4. ПЛАШКА UI (Draggable Badge)
 // ==========================================================
 function createVibeBadge() {
@@ -248,10 +431,24 @@ function updatePanelUI() {
     if (isLimitReached && !window.ignoreLimitsSession) {
         statusSpan.innerText = '🛑 ЛИМИТЫ'; statusSpan.style.background = '#ff4444'; return;
     }
-    if (lastServerState === "RUNNING") {
-        statusSpan.innerText = '⚡ ГЕНЕРАЦИЯ'; statusSpan.style.background = '#bb86fc';
-    } else {
-        statusSpan.innerText = '🟢 ГОТОВ'; statusSpan.style.background = '#31a24c';
+    
+    switch (FSM.state) {
+        case 'IDLE':
+            statusSpan.innerText = '🟢 ГОТОВ'; statusSpan.style.background = '#31a24c';
+            break;
+        case 'INJECTING':
+            statusSpan.innerText = '⚡ ВСТАВКА...'; statusSpan.style.background = '#bb86fc';
+            break;
+        case 'WAITING_BUBBLE':
+            statusSpan.innerText = '⏳ ОЖИДАНИЕ'; statusSpan.style.background = '#e6a822';
+            break;
+        case 'READING':
+            statusSpan.innerText = generationDetector.check() ? '⚡ ГЕНЕРАЦИЯ' : '🔍 ЧТЕНИЕ...';
+            statusSpan.style.background = '#bb86fc';
+            break;
+        case 'POSTING':
+            statusSpan.innerText = '📤 ОТПРАВКА'; statusSpan.style.background = '#31a24c';
+            break;
     }
 }
 
@@ -263,7 +460,7 @@ function resetChat() {
         'a[data-test-id="new-chat-button"], a[href^="/app"], button[aria-label*="New chat" i], button[aria-label*="Новый чат" i]'
     );
     if (newChatBtn) newChatBtn.click();
-    else window.location.href = "[https://gemini.google.com/app](https://gemini.google.com/app)";
+    else window.location.href = "https://gemini.google.com/app";
 }
 
 async function triggerLimitReached(reason) {
@@ -277,7 +474,6 @@ async function triggerLimitReached(reason) {
 async function checkGeminiAlerts() {
     if (window.ignoreLimitsSession) return false;
     
-    // Оптимизация reflow: проверяем только всплывающие алерты, а не весь body
     const alertZone = document.querySelector('snack-bar-container, .toast-container, [role="alert"], .error-message, .limit-message');
     const bodyText = (alertZone && alertZone.innerText ? alertZone.innerText : "").toLowerCase();
     
@@ -366,8 +562,6 @@ function getLastModelText() {
     const clone = originalNode.cloneNode(true);
     
     const preTags = Array.from(clone.querySelectorAll('pre'));
-    
-    // Безопасный маркер кавычек, чтобы не ломать парсеры чата (Канвас)
     const bTick = String.fromCharCode(96) + String.fromCharCode(96) + String.fromCharCode(96);
     
     preTags.forEach(pre => {
@@ -416,12 +610,23 @@ function getLastModelText() {
 }
 
 function checkIsGenerating() {
-    const stopBtn = document.querySelector('button[aria-label*="stop gen" i], button[aria-label*="останови" i]');
-    if (stopBtn && stopBtn.offsetWidth > 0) return true;
+    if (generationDetector.check()) return true;
 
-    const activeResponses = document.querySelectorAll('model-response');
+    // Ограничиваем поиск спиннеров строго активной зоной текущего чата
+    const chatArea = document.querySelector('chat-window, .main-content, #chat-history');
+    if (!chatArea) return false;
+
+    const activeResponses = chatArea.querySelectorAll('model-response');
     if (activeResponses.length > 0) {
         const last = activeResponses[activeResponses.length - 1];
+        
+        // Игнорируем завершенные блоки и элементы из левой панели навигации
+        if (last.classList.contains('completed') || 
+            last.hasAttribute('data-loading', 'false') ||
+            last.closest('side-navigation-v2, mat-sidenav, .bots-list-container')) {
+            return false;
+        }
+
         const spinner = last.querySelector('mat-progress-spinner, .gmat-mdc-progress-spinner, mat-spinner');
         if (spinner) {
             const style = window.getComputedStyle(spinner);
@@ -494,6 +699,7 @@ async function uploadFiles(filesPayload, inputArea) {
 // ==========================================================
 async function sendToGemini(text, filesPayload = []) {
     if (!await ensureProMode()) {
+        FSM.reset();
         isProcessing = false;
         return;
     }
@@ -501,7 +707,11 @@ async function sendToGemini(text, filesPayload = []) {
     const inputArea = document.querySelector(
         'rich-textarea > div, div[contenteditable="true"][role="textbox"], textarea#prompt-textarea'
     );
-    if (!inputArea) { isProcessing = false; return; }
+    if (!inputArea) { 
+        FSM.reset();
+        isProcessing = false; 
+        return; 
+    }
 
     if (filesPayload && filesPayload.length > 0) {
         await uploadFiles(filesPayload, inputArea);
@@ -514,6 +724,7 @@ async function sendToGemini(text, filesPayload = []) {
     if (!fieldSnapshot.trim()) {
         console.error('VibeCoder: ⚠️ ПОЛЕ ПУСТОЕ! Отправка прервана.');
         sendLog('❌ Поле ввода пустое перед отправкой. Задача не выполнена.', '#ff4444');
+        FSM.reset();
         isProcessing = false;
         activeTaskId = null;
         return;
@@ -552,6 +763,7 @@ async function sendToGemini(text, filesPayload = []) {
             console.error('VibeCoder: Кнопка Send не найдена!');
             sendLog('❌ Кнопка Send не найдена!', '#ff4444');
             window.waitingForNewBubble = false;
+            FSM.reset();
             isProcessing = false;
             activeTaskId = null;
         }
@@ -559,142 +771,175 @@ async function sendToGemini(text, filesPayload = []) {
 }
 
 // ==========================================================
-// 9. ГЛАВНЫЙ ОРКЕСТРАТОР С ЖЕСТКИМ РАДАРОМ И ЗАЩИТОЙ
+// 9. ГЛАВНЫЙ ОРКЕСТРАТОР С ЖЕСТКИМ РАДАРОМ И ЗАЩИТОЙ (FSM)
 // ==========================================================
 async function checkServer() {
-    // Failsafe: защищает от вечного зависания, если скрипт застрял без задачи
-    if (isProcessing && !window.waitingForNewBubble && !activeTaskId) {
-        if (Date.now() - window.processingStartTime > 20000) {
-            console.warn("VibeCoder: Failsafe — жесткий сброс зависания.");
-            isProcessing = false;
-            window.isRadarMode = false;
-            activeTaskId = null;
-        }
+    // Глобальный Failsafe предохранитель
+    if (FSM.state !== 'IDLE' && FSM.elapsed() > 90000) {
+        console.error(`FSM: Таймаут в состоянии ${FSM.state}. Принудительный сброс.`);
+        sendLog(`⏰ Таймаут ${FSM.state}. Сброс.`, '#ff4444');
+        FSM.reset();
+        isProcessing = false;
+        activeTaskId = null;
+        window.isRadarMode = false;
         return;
     }
 
     try {
-        if (!isProcessing && !activeTaskId) {
-            const data = await fetchGetProxy(`${SERVER_URL}/get_task?target_id=${encodeURIComponent(myTabId)}`);
-            if (data.status === "success" && data.task) {
+        switch (FSM.state) {
+
+            case 'IDLE': {
+                // Добавляем передачу текущей известной сессии в параметры запроса
+                const sessionParam = knownServerSessionId ? `&session_id=${encodeURIComponent(knownServerSessionId)}` : '';
+                const data = await fetchGetProxy(`${SERVER_URL}/get_task?target_id=${encodeURIComponent(myTabId)}${sessionParam}`);
                 
-                // ТАЙМЕР ЗАЩИТЫ СТАРТУЕТ ТОЛЬКО ПРИ ПОЛУЧЕНИИ ЗАДАЧИ
-                window.processingStartTime = Date.now();
-                
-                if (data.task.prompt === "___RADAR_MODE___") {
-                    activeTaskId = "manual_drag_task_" + Date.now();
+                if (data && data.status) {
+                    // [FIX-E] Проверка консистентности сессии: если бэкенд отдал новый session_id,
+                    // значит Python-сервер был перезапущен. Сбрасываем все активные процессы.
+                    if (data.server_session_id && knownServerSessionId && data.server_session_id !== knownServerSessionId) {
+                        console.warn(`VibeCoder: Обнаружен перезапуск бэкенда (смена сессии: ${knownServerSessionId} -> ${data.server_session_id}). Сброс автомата.`);
+                        knownServerSessionId = data.server_session_id;
+                        FSM.reset();
+                        isProcessing = false;
+                        activeTaskId = null;
+                        window.isRadarMode = false;
+                        return;
+                    }
+
+                    // Первичная фиксация сессии
+                    if (data.server_session_id && !knownServerSessionId) {
+                        knownServerSessionId = data.server_session_id;
+                    }
+
+                    if (data.status === "success" && data.task) {
+                        window.processingStartTime = Date.now();
+                        
+                        if (data.task.prompt === "___RADAR_MODE___") {
+                            FSM._taskId = "manual_drag_task_" + Date.now();
+                            activeTaskId = FSM._taskId;
+                            isProcessing = true;
+                            window.isRadarMode = true;
+                            FSM._snapshotBeforeSend = getLastModelText();
+                            window.textBeforeSend = FSM._snapshotBeforeSend;
+                            window.waitingForNewBubble = true;
+                            window.waitStartTime = Date.now();
+                            FSM.transition('WAITING_BUBBLE');
+                            sendLog("📡 Радар на связи! Жду вашего нажатия Enter...", "#bb86fc");
+                            return;
+                        } else {
+                            FSM._taskId = data.task.id;
+                            activeTaskId = FSM._taskId;
+                            isProcessing = true;
+                            window.isRadarMode = false;
+                            if (!FSM.transition('INJECTING')) return;
+                            
+                            FSM._snapshotBeforeSend = getLastModelText();
+                            await sendToGemini(data.task.prompt, data.task.images);
+                            FSM.transition('WAITING_BUBBLE');
+                            return;
+                        }
+                    }
+                }
+
+                if (checkIsGenerating()) {
+                    window.processingStartTime = Date.now();
+                    FSM._taskId = "manual_drag_task_" + Date.now();
+                    activeTaskId = FSM._taskId;
                     isProcessing = true;
-                    lastServerState = "RUNNING";
-                    updatePanelUI();
-                    currentCandidateText = "";
-                    stableCount = 0;
-                    window.textBeforeSend = getLastModelText();
-                    window.waitingForNewBubble = true;
-                    window.waitStartTime = Date.now();
-                    window.isRadarMode = true;
-                    sendLog("📡 Радар на связи! Жду вашего нажатия Enter...", "#bb86fc");
-                    return;
-                } else {
-                    activeTaskId = data.task.id;
-                    isProcessing = true;
-                    lastServerState = "RUNNING";
-                    updatePanelUI();
-                    currentCandidateText = "";
-                    stableCount = 0;
                     window.isRadarMode = false;
-                    await sendToGemini(data.task.prompt, data.task.images);
+                    currentCandidateText = "";
+                    stableCount = 0;
+                    FSM.transition('READING');
+                    sendLog("📡 Засечена внезапная ручная генерация! Начинаем перехват ответа...", "#bb86fc");
                     return;
                 }
+                break;
             }
 
-            if (checkIsGenerating()) {
-                window.processingStartTime = Date.now();
-                activeTaskId = "manual_drag_task_" + Date.now();
-                isProcessing = true;
-                lastServerState = "RUNNING"; 
-                updatePanelUI();
-                currentCandidateText = "";
-                stableCount = 0;
-                sendLog("📡 Засечена внезапная ручная генерация! Начинаем перехват ответа...", "#bb86fc");
-                return;
-            }
-        }
-
-        if (!activeTaskId) {
-            lastServerState = "STOPPED"; updatePanelUI(); return;
-        }
-
-        checkGeminiAlerts().catch(() => {});
-
-        const currentText = getLastModelText();
-
-        if (window.waitingForNewBubble) {
-            const elapsed = Date.now() - window.waitStartTime;
-            
-            // ВЕРНОЕ ВРЕМЯ ОЖИДАНИЯ: 120 секунд для ВСЕХ задач (и радар, и обычные)
-            const timeoutLimit = 120000; 
-
-            if (currentText !== window.textBeforeSend) {
-                window.waitingForNewBubble = false;
-                stableCount = 0;
-                // Теперь мы всегда пишем, что перехват пошел, независимо от режима!
-                sendLog("📡 Генерация пошла! Перехватываю ответ...", "#bb86fc");
-            } else if (elapsed > timeoutLimit) {
-                window.waitingForNewBubble = false;
-                isProcessing = false;
-                stableCount = 0;
-                activeTaskId = null;
-                sendLog("⏳ Таймаут ожидания ответа (2 мин). Перехват отменен.", "#ffaa00");
-                window.isRadarMode = false;
-                return;
-            } else {
-                lastServerState = "RUNNING"; updatePanelUI(); return;
-            }
-        }
-
-        if (checkIsGenerating()) {
-            stableCount = 0;
-            lastServerState = "RUNNING"; updatePanelUI(); return;
-        }
-
-        if (currentText && currentText.trim()) {
-            const diffText = currentText.replace(/Thinking for \d+s/gi, '').trim();
-
-            if (diffText !== currentCandidateText) {
-                currentCandidateText = diffText;
-                stableCount = 0;
-            } else {
-                stableCount++;
-            }
-
-            if (stableCount >= 2 && activeTaskId) {
-                isProcessing = true;
-                lastServerState = "STOPPED"; updatePanelUI();
-                try {
-                    sendLog("📤 Чтение завершено, отправляю текст в IDE...", "#31a24c");
-                    await fetchPostProxy(`${SERVER_URL}/post_result`, JSON.stringify({
-                        task_id: activeTaskId, result: currentText, source_id: myTabId
-                    }));
-                } catch (err) {
-                    console.error('VibeCoder: Ошибка отправки результата:', err);
-                } finally {
+            case 'WAITING_BUBBLE': {
+                if (FSM.elapsed() > 120000) {
+                    sendLog("⏳ Таймаут ожидания ответа (2 мин). Перехват отменен.", "#ffaa00");
+                    FSM.reset();
                     isProcessing = false;
                     activeTaskId = null;
                     window.isRadarMode = false;
+                    return;
                 }
-            } else {
-                lastServerState = "RUNNING"; updatePanelUI();
+                
+                const currentText = getLastModelText();
+                if (currentText !== FSM._snapshotBeforeSend) {
+                    window.waitingForNewBubble = false;
+                    stableCount = 0;
+                    currentCandidateText = "";
+                    sendLog("📡 Генерация пошла! Перехватываю ответ...", "#bb86fc");
+                    FSM.transition('READING');
+                }
+                break;
             }
-        } else {
-            lastServerState = "RUNNING"; updatePanelUI();
+
+            case 'READING': {
+                if (FSM.elapsed() > 120000) {
+                    sendLog("⚠️ Чтение затянулось или зависло. Сброс.", "#ffaa00");
+                    FSM.reset();
+                    isProcessing = false;
+                    activeTaskId = null;
+                    window.isRadarMode = false;
+                    return;
+                }
+
+                checkGeminiAlerts().catch(() => {});
+
+                const isGen = checkIsGenerating();
+                const currentText = getLastModelText();
+                const diffText = currentText.replace(/Thinking for \d+s/gi, '').trim();
+
+                if (isGen) {
+                    stableCount = 0;
+                    currentCandidateText = diffText;
+                    updatePanelUI();
+                    return;
+                }
+
+                if (diffText !== currentCandidateText) {
+                    currentCandidateText = diffText;
+                    stableCount = 0;
+                } else {
+                    stableCount++;
+                }
+
+                if (stableCount >= 2 && activeTaskId) {
+                    if (FSM.transition('POSTING')) {
+                        isProcessing = true;
+                        try {
+                            sendLog("📤 Чтение завершено, отправляю текст в IDE...", "#31a24c");
+                            await fetchPostProxy(`${SERVER_URL}/post_result`, JSON.stringify({
+                                task_id: activeTaskId, result: currentText, source_id: myTabId
+                            }));
+                        } catch (err) {
+                            console.error('VibeCoder: Ошибка отправки результата:', err);
+                        } finally {
+                            isProcessing = false;
+                            activeTaskId = null;
+                            window.isRadarMode = false;
+                            FSM.reset();
+                        }
+                    }
+                } else {
+                    updatePanelUI();
+                }
+                break;
+            }
+
+            case 'POSTING': {
+                break;
+            }
         }
     } catch (e) {
         console.error("VibeCoder: Критическая ошибка в checkServer:", e);
         isProcessing = false;
         window.isRadarMode = false;
         activeTaskId = null;
-        lastServerState = "STOPPED"; 
-        updatePanelUI();
+        FSM.reset();
     }
 }
 
