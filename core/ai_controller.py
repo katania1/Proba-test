@@ -468,15 +468,19 @@ class AIController(QObject):
                 else:
                     self.mw.scroll_chat()
 
-                msg = QMessageBox(self.mw)
-                msg.setWindowTitle("🤖 Запрос контекста")
-                msg.setText(f"ИИ просит предоставить код следующих файлов для работы:\n\n" + "\n".join(requested_files) + "\n\nОтправить их сейчас автоматически?")
-                msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-                msg.setStyleSheet("QMessageBox { background-color: #252526; color: #d4d4d4; } QLabel { color: #d4d4d4; font-size: 13px; } QPushButton { background-color: #0e639c; color: white; padding: 6px 20px; border-radius: 4px; font-weight: bold; } QPushButton:hover { background-color: #1177bb; }")
-
-                if msg.exec() == QMessageBox.StandardButton.Yes:
+                # --- НОВЫЙ ВЫЗОВ УМНОГО ДИАЛОГА ---
+                from core.request_files_dialog import RequestedFilesDialog
+                from PyQt6.QtWidgets import QDialog
+                
+                dlg = RequestedFilesDialog(self, requested_files, self.mw)
+                
+                # Если нажали "Отправить текстом (Авто)" - вернется Accepted
+                if dlg.exec() == QDialog.DialogCode.Accepted:
                     self.send_requested_files(requested_files)
-                    return
+                    
+                # В случае Драг-энд-Дропа диалог закроется сам (Rejected), 
+                # и мы просто прерываем текущий цикл, так как задача уже улетела через браузер
+                return
 
             # Делегирование физических операций с файловой системой
             create_files = data.get("create_files", [])

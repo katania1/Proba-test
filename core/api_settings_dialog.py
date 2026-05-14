@@ -331,8 +331,13 @@ class APISettingsDialog(QDialog):
             self.tabs_ui['OpenAI']['url'].setText(
                 self.settings.value("openai_base_url", "https://api.openai.com/v1")
             )
+            # ВОССТАНОВЛЕНО: загружаем пул ключей RAG
             tab_w = self.tabs_ui['OpenAI']['tab_widget']
-            tab_w.load_emb_keys(self.settings.value("openai_embedding_key", "[]"))
+            emb_json = self.settings.value("openai_embedding_key", "")
+            if emb_json and emb_json != "[]":
+                tab_w.load_emb_keys(emb_json)
+            else:
+                tab_w.add_emb_key_row()
         
         if 'Anthropic' in self.tabs_ui:
             self.tabs_ui['Anthropic']['key'].setText(self.settings.value("anthropic_api_key", ""))
@@ -342,8 +347,13 @@ class APISettingsDialog(QDialog):
             
         if 'Gemini' in self.tabs_ui:
             self.tabs_ui['Gemini']['key'].setText(self.settings.value("gemini_api_key", ""))
+            # ВОССТАНОВЛЕНО: загружаем пул ключей RAG
             tab_w = self.tabs_ui['Gemini']['tab_widget']
-            tab_w.load_emb_keys(self.settings.value("gemini_embedding_key", "[]"))
+            emb_json = self.settings.value("gemini_embedding_key", "")
+            if emb_json and emb_json != "[]":
+                tab_w.load_emb_keys(emb_json)
+            else:
+                tab_w.add_emb_key_row()
 
         # Восстановление сохраненного состояния моделей для всех вкладок
         for p_id, ui in self.tabs_ui.items():

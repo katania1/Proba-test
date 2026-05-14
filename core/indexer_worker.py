@@ -54,7 +54,9 @@ class IndexerWorker(QThread):
                 return
                 
             files_to_index = self._gather_files()
-            if not self.is_running: return
+            if not self.is_running:
+                self.finished_signal.emit()
+                return
             
             indexed_files = self.db.get_indexed_files()
             rel_files_to_index = set(os.path.relpath(f, self.project_path).replace('\\', '/') for f in files_to_index)
@@ -91,7 +93,9 @@ class IndexerWorker(QThread):
                     break
                     
                 rel_path = os.path.relpath(file_path, self.project_path).replace('\\', '/')
-                if not self.silent: self.progress_signal.emit(i + 1, total_files, rel_path)
+                
+                # ОПТИМИЗАЦИЯ: Убрана проверка if not self.silent для отображения прогресса в статус-баре всегда
+                self.progress_signal.emit(i + 1, total_files, rel_path)
                 
                 current_hash = self.calculate_md5(file_path)
                 
@@ -118,6 +122,8 @@ class IndexerWorker(QThread):
             if is_quota_error:
                 if not self.silent and processed_count > 0:
                     self.log_signal.emit(f"До прерывания успели обработать: {processed_count} файлов.", "#ffaa00")
+                # ГАРАНТИЯ СБРОСА UI: Отправляем error_signal для контроллера, чтобы снять желтый статус кнопки
+                self.error_signal.emit("Индексация прервана: исчерпаны квоты/лимиты API ключей.")
                 return 
 
             if self.is_running and not self.silent:
@@ -137,14 +143,23 @@ class IndexerWorker(QThread):
         from core.file_explorer import GitIgnoreModel
         ignore_checker = GitIgnoreModel(self.project_path)
         
-        for root, _, filenames in os.walk(self.project_path):
+        for root, dirs, filenames in os.walk(self.project_path):
             if not self.is_running: break
+            
+            # ✅ ФИКС: Жестко отсекаем черные дыры на уровне обхода дерева каталогов.
+            # os.walk больше физически не зайдет в node_modules, venv и скрытые папки (типа .git)
+            dirs[:] = [d for d in dirs if not d.startswith('.') and d not in (
+                'venv', '__pycache__', 'node_modules', 'config', 'env', 'dist', 'build'
+            )]
+            
             for filename in filenames:
                 file_path = os.path.join(root, filename)
                 ext = os.path.splitext(filename)[1].lower()
                 
+                # Двойная защита: проверяем расширение И пользовательские исключения
                 if ext in allowed_extensions and not ignore_checker.is_ignored_for_rag(file_path):
                     files.append(file_path)
+                    
         return files
 
     def _process_file(self, abs_path, rel_path, file_hash):
@@ -174,10 +189,10 @@ class IndexerWorker(QThread):
             context_text = f"Файл: {rel_path}\nКод:\n{chunk}"
             
             vector = None
-            max_retries = 5
+            max_attempts = 10
             base_delay = 5
             
-            for attempt in range(max_retries):
+            for attempt in range(max_attempts):
                 if not self.is_running: return
                 try:
                     current_key = getattr(self.embed_provider, 'api_key', 'unknown')
@@ -224,7 +239,8 @@ class IndexerWorker(QThread):
                     error_text = str(e).lower()
                     masked = f"...{current_key[-4:]}" if len(current_key) > 4 else "***"
                     
-                    if "quota" in error_text:
+                    # ИСПРАВЛЕНИЕ: Ловим как явную квоту, так и 429/resource_exhausted для ротации
+                    if "quota" in error_text or "quota_exceeded" in error_text:
                         exhausted = json.loads(str(self.settings.value("rag_exhausted_keys", "[]")))
                         if current_key not in exhausted:
                             exhausted.append(current_key)
@@ -243,15 +259,32 @@ class IndexerWorker(QThread):
                             raise Exception("QUOTA_EXCEEDED")
                             
                     elif "429" in error_text or "resource_exhausted" in error_text:
-                        if attempt < max_retries - 1:
-                            wait_time = base_delay * (2 ** attempt)
+                        # Делаем 2 попытки с задержкой, если не помогает — ротируем ключ
+                        if attempt % 3 < 2:
+                            wait_time = base_delay * (2 ** (attempt % 3))
                             if not self.silent: 
-                                self.log_signal.emit(f"⏳ API перегружено (RPM). Ожидание {wait_time} сек...", "#e6a822")
+                                self.log_signal.emit(f"⏳ API перегружено (RPM/429). Ожидание {wait_time} сек...", "#e6a822")
                             for _ in range(wait_time * 2):
                                 if not self.is_running: return
                                 time.sleep(0.5)
                         else:
-                            raise Exception(f"Превышен лимит попыток (ошибка 429): {e}")
+                            # Переключаем ключ после исчерпания попыток ожидания
+                            exhausted = json.loads(str(self.settings.value("rag_exhausted_keys", "[]")))
+                            if current_key not in exhausted:
+                                exhausted.append(current_key)
+                                self.settings.setValue("rag_exhausted_keys", json.dumps(exhausted))
+                                
+                            if EmbeddingFactory.switch_to_next_key():
+                                if not self.silent: 
+                                    self.log_signal.emit(f"⚠️ Лимит попыток 429 для ключа {masked}! Переключение на резервный...", "#e6a822")
+                                self.embed_provider, _ = EmbeddingFactory.get_provider("Gemini")
+                                continue
+                            else:
+                                self.is_running = False
+                                msg = "🚨 ИСЧЕРПАНЫ ЛИМИТЫ ВСЕХ КЛЮЧЕЙ API GOOGLE."
+                                if not self.silent: self.log_signal.emit(msg, "#ff4444")
+                                self.error_signal.emit(msg)
+                                raise Exception("QUOTA_EXCEEDED")
                     else:
                         self.is_running = False
                         msg = f"🚨 Критическая ошибка ключа {masked}: {str(e)}"

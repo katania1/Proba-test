@@ -20,9 +20,15 @@ class ScannerThread(QThread):
         has_changes = False
         current_mtimes = {}
         
+        # ОПТИМИЗАЦИЯ: Исключаем служебные файлы историй и логов
+        ignored_files = {'chat_history.json', 'rag_usage_history.json', 'agent_traces.json'}
+        
         for root, dirs, files in os.walk(self.project_path):
-            dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ('venv', '__pycache__', 'node_modules')]
+            # Исключаем служебную папку config, скрытые папки и окружения
+            dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ('venv', '__pycache__', 'node_modules', 'config', 'env')]
             for f in files:
+                if f in ignored_files or f.endswith('.log') or 'history' in f.lower() or 'trace' in f.lower():
+                    continue
                 ext = os.path.splitext(f)[1].lower()
                 if ext in self.allowed_extensions:
                     path = os.path.join(root, f)
@@ -34,6 +40,10 @@ class ScannerThread(QThread):
                     except OSError:
                         pass
                         
+        # ОПТИМИЗАЦИЯ: Детектирование физического удаления файлов из проекта
+        if len(current_mtimes) != len(self.last_mtimes):
+            has_changes = True
+            
         self.scan_finished.emit(current_mtimes, has_changes)
 
 
@@ -58,6 +68,21 @@ class RagController:
         }
         
         self.scanner_thread = None
+        
+        # ИСПРАВЛЕНИЕ 1: Мгновенный запуск сканирования при старте программы
+        self.setup_watcher()
+        
+        # УМНЫЙ СТАРТ: Автоматический запуск тихой индексации, если индекс пуст или отсутствует
+        try:
+            db_path = os.path.join(self.mw.project_path, ".vibecoder", "vector_db")
+            if not os.path.exists(db_path):
+                QTimer.singleShot(1000, self.trigger_silent_update)
+            else:
+                db = VectorDatabase(self.mw.project_path)
+                if db.collection.count() == 0:
+                    QTimer.singleShot(1000, self.trigger_silent_update)
+        except Exception:
+            pass
 
     def cleanup(self):
         """Полная остановка таймеров и потоков перед уничтожением контроллера (Защита от утечек контекста)"""
@@ -124,9 +149,13 @@ class RagController:
         self.debounce_timer.stop()
         self.last_mtimes.clear()
         
+        ignored_files = {'chat_history.json', 'rag_usage_history.json', 'agent_traces.json'}
+        
         for root, dirs, files in os.walk(self.mw.project_path):
-            dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ('venv', '__pycache__', 'node_modules')]
+            dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ('venv', '__pycache__', 'node_modules', 'config', 'env')]
             for f in files:
+                if f in ignored_files or f.endswith('.log') or 'history' in f.lower() or 'trace' in f.lower():
+                    continue
                 ext = os.path.splitext(f)[1].lower()
                 if ext in self.allowed_extensions:
                     path = os.path.join(root, f)
@@ -185,13 +214,23 @@ class RagController:
         self.mw.btn_rag.setStyleSheet("background-color: #e6a822; color: black; font-weight: bold; border-radius: 4px; padding: 0 10px;")
         
         self.indexer_worker = IndexerWorker(self.mw.project_path, self.mw.file_manager, silent=True)
+        self.indexer_worker.progress_signal.connect(self._on_indexer_progress) # Подключаем отображение прогресса в тихом режиме
         self.indexer_worker.finished_signal.connect(self._on_silent_rag_finished)
+        self.indexer_worker.error_signal.connect(self._on_silent_rag_error)
         self.indexer_worker.log_signal.connect(lambda msg, color: self.mw.log_system(msg, color=color))
         self.indexer_worker.start()
 
     def _on_silent_rag_finished(self):
         self.mw.btn_rag.setText("🧠 RAG (Индекс)")
         self.mw.btn_rag.setStyleSheet("background-color: #00838f; color: white; font-weight: bold; border-radius: 4px; padding: 0 10px;")
+        # Очищаем статус-бар по завершении
+        self.mw.status_bar.showMessage("🟢 RAG: Фоновая синхронизация завершена")
+
+    def _on_silent_rag_error(self, err_msg):
+        self.mw.btn_rag.setText("🧠 RAG (Индекс)")
+        self.mw.btn_rag.setStyleSheet("background-color: #00838f; color: white; font-weight: bold; border-radius: 4px; padding: 0 10px;")
+        self.mw.log_system(f"⚠️ [RAG] Фоновое обновление прервано: {err_msg}", color="#ffaa00")
+        self.mw.status_bar.showMessage("⚠️ RAG: Ошибка фонового обновления")
 
     def _on_indexer_progress(self, current, total, filename):
         self.mw.status_bar.showMessage(f"🔄 Индексация (RAG): {current}/{total} | Файл: {filename}")

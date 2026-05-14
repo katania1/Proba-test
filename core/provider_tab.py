@@ -1,7 +1,8 @@
 import os
 import json
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
-                             QLabel, QLineEdit, QListWidget, QAbstractItemView)
+                             QLabel, QLineEdit, QListWidget, QAbstractItemView,
+                             QSizePolicy)
 from PyQt6.QtCore import Qt
 
 # Импортируем роли и переиспользуемые виджеты из нашего модуля компонентов
@@ -13,8 +14,7 @@ from core.settings_components import (ROLE_NAME, ROLE_NOTE, ROLE_STATUS,
 class ProviderTabWidget(QWidget):
     """
     Изолированный виджет содержимого вкладки настроек конкретного API-провайдера.
-    Инкапсулирует всю внутреннюю верстку (ключи, URL, пул RAG, поиск, список моделей)
-    и локальную логику фильтрации списка.
+    Инкапсулирует всю внутреннюю верстку и локальную логику.
     """
     def __init__(self, provider_id, key_placeholder, has_base_url=True, 
                  is_custom=False, has_embedding_key=False, 
@@ -30,6 +30,7 @@ class ProviderTabWidget(QWidget):
         # Внутренние ссылки на элементы интерфейса для быстрого доступа
         self.key_input = None
         self.url_input = None
+        self.emb_keys_container = None 
         self.emb_keys_layout = None
         self.search_input = None
         self.btn_fetch = None
@@ -41,6 +42,9 @@ class ProviderTabWidget(QWidget):
         self.lbl_status = None
         
         self.init_ui()
+
+    def showEvent(self, event):
+        super().showEvent(event)
 
     def _create_standard_input(self, is_password=False, placeholder=""):
         line_edit = QLineEdit()
@@ -54,46 +58,61 @@ class ProviderTabWidget(QWidget):
         return line_edit
 
     def init_ui(self):
-        layout = QVBoxLayout(self)
-        creds_layout = QVBoxLayout()
+        # Главный макет вкладки
+        self.main_layout = QVBoxLayout(self)
+        self.main_layout.setContentsMargins(8, 8, 8, 8)
+        
+        # ==========================================
+        # ВЕРХНИЙ ХОЛСТ (Настройки API и Ключи)
+        # ==========================================
+        self.top_widget = QWidget(self)
+        self.top_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed) 
+        self.top_layout = QVBoxLayout(self.top_widget)
+        self.top_layout.setContentsMargins(0, 0, 0, 0)
+        self.top_layout.setSpacing(5)
         
         # --- БЛОК 1: Основной ключ ---
         lbl_main_key = QLabel("API Key (Для чата и генерации кода):")
         lbl_main_key.setStyleSheet("color: #d4d4d4; font-weight: bold;")
-        creds_layout.addWidget(lbl_main_key)
+        self.top_layout.addWidget(lbl_main_key)
         
         self.key_input = self._create_standard_input(is_password=True, placeholder=self.key_placeholder)
-        creds_layout.addWidget(self.key_input)
+        self.top_layout.addWidget(self.key_input)
         
         if self.has_base_url:
-            creds_layout.addWidget(QLabel("Base URL:"))
+            self.top_layout.addWidget(QLabel("Base URL:"))
             self.url_input = self._create_standard_input(placeholder="https://api...")
-            creds_layout.addWidget(self.url_input)
+            self.top_layout.addWidget(self.url_input)
         else:
             self.url_input = None
             
-        # --- БЛОК 2: Пул ключей RAG (Динамический) ---
+        # --- БЛОК 2: Пул ключей RAG ---
         if self.has_embedding_key:
             lbl_emb_key = QLabel("Пул ключей Embedding (Для RAG / Авто-ротации):")
             lbl_emb_key.setStyleSheet("color: #e6a822; font-weight: bold; margin-top: 10px;")
-            creds_layout.addWidget(lbl_emb_key)
+            self.top_layout.addWidget(lbl_emb_key)
             
-            self.emb_keys_layout = QVBoxLayout()
+            # Изолированный контейнер ТОЛЬКО для строк RAG-ключей
+            self.emb_keys_container = QWidget(self.top_widget)
+            self.emb_keys_layout = QVBoxLayout(self.emb_keys_container)
+            self.emb_keys_layout.setContentsMargins(0, 0, 0, 0)
             self.emb_keys_layout.setSpacing(5)
-            creds_layout.addLayout(self.emb_keys_layout)
+            self.top_layout.addWidget(self.emb_keys_container)
             
-            btn_add_key = QPushButton("➕ Добавить резервный ключ")
-            btn_add_key.setStyleSheet(
+            self.btn_add_key = QPushButton("➕ Добавить резервный ключ")
+            self.btn_add_key.setStyleSheet(
                 "background-color: #333333; color: #d4d4d4; "
-                "padding: 4px; border-radius: 3px; font-weight: bold;"
+                "padding: 6px; border-radius: 3px; font-weight: bold;"
             )
-            btn_add_key.clicked.connect(lambda: self.add_emb_key_row())
-            creds_layout.addWidget(btn_add_key)
-            
-        layout.addLayout(creds_layout)
-        layout.addSpacing(5)
+            self.btn_add_key.clicked.connect(self.add_emb_key_row)
+            self.top_layout.addWidget(self.btn_add_key)
         
-        # --- БЛОК 3: Панель поиска и действий со списком ---
+        self.main_layout.addWidget(self.top_widget)
+        self.main_layout.addSpacing(5)
+        
+        # ==========================================
+        # НИЖНИЙ ХОЛСТ (Список моделей)
+        # ==========================================
         list_header_layout = QHBoxLayout()
         
         self.search_input = self._create_standard_input(placeholder="🔍 Поиск по модели или примечанию...")
@@ -114,17 +133,16 @@ class ProviderTabWidget(QWidget):
             self.btn_delete = QPushButton("🗑️")
             self.btn_delete.setToolTip("Удалить провайдера")
             self.btn_delete.setStyleSheet(
-                "background-color: #d32f2f; color: white; "
-                "padding: 6px 10px; border-radius: 4px;"
+                "background-color: #d32f2f; color: white; padding: 6px 10px; border-radius: 4px;"
             )
             if "delete_provider" in self.callbacks:
                 self.btn_delete.clicked.connect(self.callbacks["delete_provider"])
             list_header_layout.addWidget(self.btn_delete)
             
-        layout.addLayout(list_header_layout)
+        self.main_layout.addLayout(list_header_layout)
         
-        # --- БЛОК 4: Список моделей ---
         self.list_models = QListWidget()
+        self.list_models.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.list_models.setStyleSheet("""
             QListWidget { background-color: #252526; border: 1px solid #3c3c3c; border-radius: 4px; font-size: 13px; outline: none; padding: 5px; }
             QListWidget::item { padding: 4px; margin: 2px; border-radius: 3px; }
@@ -138,12 +156,10 @@ class ProviderTabWidget(QWidget):
         if "context_menu" in self.callbacks:
             self.list_models.customContextMenuRequested.connect(self.callbacks["context_menu"])
             
-        layout.addWidget(self.list_models)
+        self.main_layout.addWidget(self.list_models, stretch=1) 
         
-        # Подключение локальной фильтрации
         self.search_input.textChanged.connect(self.filter_models)
         
-        # --- БЛОК 5: Управление выделением ---
         sel_layout = QHBoxLayout()
         self.btn_sel_all = QPushButton("Выбрать все")
         self.btn_sel_all.setStyleSheet("background-color: #333333; padding: 4px 10px; border-radius: 3px;")
@@ -154,9 +170,8 @@ class ProviderTabWidget(QWidget):
         sel_layout.addWidget(self.btn_sel_all)
         sel_layout.addWidget(self.btn_sel_none)
         sel_layout.addStretch()
-        layout.addLayout(sel_layout)
+        self.main_layout.addLayout(sel_layout)
         
-        # --- БЛОК 6: Запуск проверки и статус ---
         verify_layout = QHBoxLayout()
         self.btn_verify = QPushButton("🚀 Проверить выбранные модели")
         self.btn_verify.setStyleSheet(
@@ -164,14 +179,13 @@ class ProviderTabWidget(QWidget):
             "border-radius: 4px; font-weight: bold; font-size: 14px;"
         )
         verify_layout.addWidget(self.btn_verify)
-        layout.addLayout(verify_layout)
+        self.main_layout.addLayout(verify_layout)
         
-        self.lbl_status = QLabel("Готово к работе. Загрузите или выберите модели.")
+        self.lbl_status = QLabel("Готово к работе. Загрузите или выберите models.")
         self.lbl_status.setStyleSheet("color: #888888; margin-top: 5px;")
         self.lbl_status.setWordWrap(True)
-        layout.addWidget(self.lbl_status)
+        self.main_layout.addWidget(self.lbl_status)
         
-        # Подключение внешних сигналов управления
         if "fetch_models" in self.callbacks:
             self.btn_fetch.clicked.connect(self.callbacks["fetch_models"])
         if "verify_models" in self.callbacks:
@@ -181,7 +195,6 @@ class ProviderTabWidget(QWidget):
         self.btn_sel_none.clicked.connect(lambda: self.toggle_selection(False))
 
     def filter_models(self, text):
-        """Локальная фильтрация элементов списка моделей по имени и примечанию"""
         search_text = text.lower()
         for i in range(self.list_models.count()):
             item = self.list_models.item(i)
@@ -190,7 +203,6 @@ class ProviderTabWidget(QWidget):
             item.setHidden(search_text not in clean_name and search_text not in note)
 
     def toggle_selection(self, check):
-        """Пакетное переключение состояния чекбоксов видимых моделей"""
         state = Qt.CheckState.Checked if check else Qt.CheckState.Unchecked
         for i in range(self.list_models.count()):
             item = self.list_models.item(i)
@@ -199,25 +211,36 @@ class ProviderTabWidget(QWidget):
 
     def add_emb_key_row(self, key_data=None):
         """Добавляет новую строку ввода ключа RAG в динамический пул"""
-        if not self.emb_keys_layout:
+        # ✅ ФИКС КРАША: Если функция вызвана кнопкой (передан False), обнуляем до None
+        if isinstance(key_data, bool):
+            key_data = None
+            
+        if self.emb_keys_layout is None:
             return
             
         def remove_row(row_widget):
             self.emb_keys_layout.removeWidget(row_widget)
+            row_widget.setParent(None) 
             row_widget.deleteLater()
             
-        row_w = RagKeyRowWidget(key_data=key_data, removal_callback=remove_row)
+        row_w = RagKeyRowWidget(
+            key_data=key_data, 
+            removal_callback=remove_row,
+            parent=self.emb_keys_container
+        )
         self.emb_keys_layout.addWidget(row_w)
+        row_w.show()
 
     def load_emb_keys(self, keys_json_str):
-        """Загружает и отрисовывает пул ключей RAG из JSON-строки настроек"""
-        if not self.emb_keys_layout:
+        """Загружает и отрисовывает пул ключей RAG из JSON-строки настроек."""
+        # ✅ ФИКС: Проверяем именно на None
+        if self.emb_keys_layout is None:
             return
             
-        # Очистка текущего пула перед загрузке
         while self.emb_keys_layout.count():
             item = self.emb_keys_layout.takeAt(0)
             if item.widget():
+                item.widget().setParent(None)
                 item.widget().deleteLater()
                 
         try:
@@ -225,7 +248,6 @@ class ProviderTabWidget(QWidget):
             if not isinstance(keys_data, list):
                 raise ValueError("Неверный формат")
         except Exception:
-            # Фолбэк: парсинг устаревшего формата через запятую
             keys_data = [
                 {"key": k.strip(), "enabled": True, "comment": ""} 
                 for k in keys_json_str.split(',') if k.strip()
@@ -239,7 +261,8 @@ class ProviderTabWidget(QWidget):
 
     def get_emb_keys_data(self):
         """Сбор актуальных данных из всех строк пула RAG для сохранения в QSettings"""
-        if not self.emb_keys_layout:
+        # ✅ ФИКС: Проверяем именно на None
+        if self.emb_keys_layout is None:
             return []
             
         keys_list = []
@@ -256,10 +279,6 @@ class ProviderTabWidget(QWidget):
         return keys_list
 
     def to_ui_dict(self):
-        """
-        Экспортирует стандартизированный словарь ссылок для обратной совместимости 
-        с существующей архитектурой основного окна настроек (self.tabs_ui).
-        """
         return {
             'tab_widget': self,
             'key': self.key_input,

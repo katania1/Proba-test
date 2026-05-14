@@ -21,13 +21,21 @@ class GeminiEmbedding(AbstractEmbedding):
             "content": {"parts": [{"text": text}]}
         }
         
-        response = requests.post(url, headers=headers, json=data, timeout=30)
+        try:
+            response = requests.post(url, headers=headers, json=data, timeout=30)
+        except Exception as req_err:
+            raise Exception(f"Embedding Network Error: {str(req_err)}")
         
         if response.status_code != 200:
             try:
-                error_msg = response.json().get("error", {}).get("message", response.text)
-                raise Exception(f"Embedding API Error ({response.status_code}): {error_msg}")
+                error_data = response.json().get("error", {})
+                error_msg = error_data.get("message", response.text)
+                error_status = error_data.get("status", "")
+                # Формируем максимально информативную строку ошибки для точного парсинга в IndexerWorker
+                raise Exception(f"Embedding API Error ({response.status_code}) [{error_status}]: {error_msg}")
             except Exception as e:
+                if "Embedding API Error" in str(e):
+                    raise e
                 raise Exception(f"Embedding API Error: {response.status_code} - {response.text}")
                 
         resp_json = response.json()

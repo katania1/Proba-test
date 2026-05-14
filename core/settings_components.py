@@ -1,7 +1,7 @@
-from PyQt6.QtWidgets import QWidget, QHBoxLayout, QLineEdit, QPushButton, QCheckBox
+from PyQt6.QtWidgets import QWidget, QHBoxLayout, QLineEdit, QPushButton, QCheckBox, QSizePolicy
 from PyQt6.QtCore import Qt
 
-# Умные роли для хранения расширенных данных списка
+# Умные роли для хранения расширенных данных списка 
 ROLE_NAME = Qt.ItemDataRole.UserRole
 ROLE_STATUS = Qt.ItemDataRole.UserRole + 1
 ROLE_NOTE = Qt.ItemDataRole.UserRole + 2
@@ -16,6 +16,11 @@ class SecureInputWidget(QWidget):
     """
     def __init__(self, placeholder="", text="", parent=None):
         super().__init__(parent)
+        
+        # ФИКС: Запрещаем сплющивать этот виджет по вертикали
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMinimumHeight(34)
+        
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(5)
@@ -51,6 +56,11 @@ class RagKeyRowWidget(QWidget):
     """
     def __init__(self, key_data=None, removal_callback=None, parent=None):
         super().__init__(parent)
+        
+        # ФИКС: Гарантируем, что строка пула всегда будет видимой и не схлопнется
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMinimumHeight(36)
+        
         if key_data is None:
             key_data = {"key": "", "enabled": True, "comment": ""}
             
@@ -72,7 +82,6 @@ class RagKeyRowWidget(QWidget):
         self.secure_input = SecureInputWidget("sk-... (Ключ)", key_data.get("key", ""))
         layout.addWidget(self.secure_input, stretch=3)
         
-        # Пробрасываем ссылку на внутренний QLineEdit для прозрачного доступа при парсинге и сохранении настроек
         self.le_key = self.secure_input.line_edit
         
         # 3. Поле комментария
