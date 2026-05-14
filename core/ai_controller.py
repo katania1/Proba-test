@@ -56,6 +56,7 @@ class AIController(QObject):
         self.retry_count = 0
         self.is_waiting_for_commit_msg = False
         self.is_waiting_for_relay_msg = False
+        self.current_mode_is_chat = False
 
     # --- Прозрачная переадресация свойств для UI ---
     @property
@@ -96,6 +97,9 @@ class AIController(QObject):
 
         self.retry_count = 0
         self.mcp_handler.reset_state()
+
+        # 🔥 ФИКС: Принудительно отключаем режим чата для гибридного драга
+        self.current_mode_is_chat = False
 
         log_func = self.mw.chat_handler.log_system if hasattr(self.mw, 'chat_handler') else self.mw.log_system
         log_func("📡 Синхронизация радара. Отправка команды в браузер...", color="#858585")
@@ -170,6 +174,9 @@ class AIController(QObject):
             return
 
         self.mcp_handler.reset_state()
+
+        # 🔥 СОХРАНЯЕМ РЕЖИМ РАБОТЫ (Чат или Кодинг) ДЛЯ ПРИЕМА ОТВЕТА
+        self.current_mode_is_chat = not is_coding_mode
 
         payload = self.context_builder.build_payload(user_text, is_coding_mode, is_browser)
         self.mw.last_full_prompt = payload["text"]
@@ -373,6 +380,23 @@ class AIController(QObject):
 
         step_suffix = f" (Шаг {self.mcp_handler.browser_mcp_step + 1})" if self.mcp_handler.browser_mcp_step > 0 else ""
         self.trace_manager.append_step(f"Ответ от ИИ{step_suffix}", raw_text)
+
+        # 🔥 НОВОЕ ПРАВИЛО: БАЙПАС ПАРСЕРОВ ДЛЯ РЕЖИМА "ЧАТ"
+        if getattr(self, 'current_mode_is_chat', False):
+            self.retry_count = 0
+            if raw_text.strip():
+                self.mw.chat_logger.log("AI", raw_text)
+                formatted_thoughts = self.orchestrator.markdown_to_html(raw_text.strip())
+                self.mw.chat_history.append(f"<div style='margin-top: 10px; margin-bottom: 10px;'><b style='color: #31a24c;'>[ОТВЕТ ИИ]:</b><br>{formatted_thoughts}</div>")
+            else:
+                self.mw.chat_history.append("<div style='margin-top: 10px; margin-bottom: 10px;'><b style='color: #ff4444;'>[ОШИБКА]:</b> Браузер прислал пустой текст. Gemini изменил дизайн.</div>")
+            
+            if hasattr(self.mw, 'chat_handler'):
+                self.mw.chat_handler.scroll_chat()
+            else:
+                self.mw.scroll_chat()
+            return
+        # ----------------------------------------------------
 
         marker = '`' * 3
         clean_result_mcp = raw_text.replace(f'{marker}json', '').replace(marker, '').strip()

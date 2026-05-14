@@ -189,9 +189,10 @@ class AIOrchestrator:
             h1, h2, h3, h4 { color: #569cd6; margin-top: 15px; margin-bottom: 10px; font-weight: bold; }
             ul, ol { margin-top: 0px; margin-bottom: 12px; margin-left: 20px; }
             li { margin-bottom: 6px; }
+            /* Стили для inline-кода (в тексте) */
             code { background-color: #2d2d2d; color: #ce9178; font-family: Consolas, monospace; padding: 2px 4px; border-radius: 3px; }
-            pre { background-color: #1e1e1e; padding: 12px; border: 1px solid #3c3c3c; margin: 10px 0; font-family: Consolas, monospace; font-size: 13px; border-radius: 5px; white-space: pre-wrap; }
-            pre code { background-color: transparent; padding: 0; color: inherit; }
+            /* Стили для больших блоков кода */
+            pre { background-color: #1e1e1e; padding: 12px; border: 1px solid #3c3c3c; margin: 10px 0; font-family: Consolas, Courier New, monospace; font-size: 13px; border-radius: 5px; white-space: pre-wrap; }
         </style>
         """
 
@@ -213,11 +214,25 @@ class AIOrchestrator:
             }
         )
 
-        # Функция вставки кнопки копирования
+        # Функция вставки кнопки копирования и очистки стилей для PyQt
         def inject_copy_button(match):
             pre_open = match.group(1)   # <pre ...>
             inner_html = match.group(2) # код с тегами подсветки
             pre_close = match.group(3)  # </pre>
+            
+            # 1. Зачищаем баг с двойными отступами от nl2br
+            inner_html = re.sub(r'<br\s*/?>', '', inner_html)
+            
+            # 2. ФИКС "ПОЛОСАТОЙ ЗЕБРЫ" В QT:
+            # PyQt не понимает сложный CSS "pre code". Удаляем вложенные теги <code>, 
+            # чтобы на них не действовал серый фон из правила глобального `code`.
+            inner_html = re.sub(r'<code[^>]*>', '', inner_html)
+            inner_html = inner_html.replace('</code>', '')
+            
+            # 3. ФИКС ЧЕРНОГО ТЕКСТА (Plaintext):
+            # Принудительно оборачиваем текст в светло-серый цвет. Подсветка Pygments 
+            # (если она есть) перекроет этот цвет для ключевых слов, а обычный текст станет читаемым.
+            inner_html = f"<span style='color: #d4d4d4;'>{inner_html}</span>"
             
             raw_code = re.sub(r'<[^>]+>', '', inner_html)
             raw_code = html.unescape(raw_code)

@@ -26,7 +26,7 @@
       "matches": [
         "*://gemini.google.com/*"
       ],
-      "js": ["content.js"],
+      "js": ["dist/content.bundle.js"],
       "run_at": "document_idle"
     }
   ]
