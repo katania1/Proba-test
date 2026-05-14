@@ -218,7 +218,7 @@ class GitDialog(QDialog):
         file_header_layout = QHBoxLayout()
         lbl_files = QLabel("Структура измененных файлов:")
         
-        self.cb_show_all = QCheckBox("Показать ВСЕ файлы проекта (для извлечения из облака)")
+        self.cb_show_all = QCheckBox("Показать ВСЕ files проекта (для извлечения из облака)")
         self.cb_show_all.setStyleSheet("""
             QCheckBox { color: #aaaaaa; font-weight: bold; outline: none; }
             QCheckBox::indicator {
@@ -314,7 +314,7 @@ class GitDialog(QDialog):
         
         self.btn_pull_surgical = QPushButton("🎯 Скачать выбранные")
         self.btn_pull_surgical.setStyleSheet("background-color: #7b1fa2; color: white; font-weight: bold; padding: 10px; border-radius: 4px;")
-        self.btn_pull_surgical.setToolTip("Скачает только те файлы, которые отмечены галочками в дереве сверху")
+        self.btn_pull_surgical.setToolTip("Скачает только те files, которые отмечены галочками в дереве сверху")
         self.btn_pull_surgical.clicked.connect(self.pull_surgical)
 
         self.btn_push = QPushButton("☁️ Отправить (Push)")
@@ -354,6 +354,7 @@ class GitDialog(QDialog):
     # ==========================================
     def load_file_tree(self):
         self.file_tree.blockSignals(True)
+        self.file_tree.setUpdatesEnabled(False) # ОПТИМИЗАЦИЯ: Отключаем перерисовку виджета
         self.file_tree.clear()
         
         if self.cb_show_all.isChecked():
@@ -366,10 +367,14 @@ class GitDialog(QDialog):
         if not files:
             item = QTreeWidgetItem(["Нет измененных файлов." if not self.cb_show_all.isChecked() else "Репозиторий пуст."])
             self.file_tree.addTopLevelItem(item)
+            self.file_tree.setUpdatesEnabled(True)
             self.file_tree.blockSignals(False)
             return
             
         cleaned_files = sorted([f.replace('\\', '/') for f in files if f])
+        
+        # ОПТИМИЗАЦИЯ: Сборка всех корневых узлов в памяти перед вставкой
+        top_level_items = []
         folder_nodes = {}
 
         for file_path in cleaned_files:
@@ -388,8 +393,10 @@ class GitDialog(QDialog):
                         node.setFlags(node.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                         node.setCheckState(0, default_check)
                         
-                        if parent_node is None: self.file_tree.addTopLevelItem(node)
-                        else: parent_node.addChild(node)
+                        if parent_node is None:
+                            top_level_items.append(node)
+                        else:
+                            parent_node.addChild(node)
                         folder_nodes[current_path] = node
                     parent_node = folder_nodes[current_path]
                 else:
@@ -399,18 +406,24 @@ class GitDialog(QDialog):
                     node.setCheckState(0, default_check)
                     node.setData(0, Qt.ItemDataRole.UserRole, file_path) 
                     
-                    if parent_node is None: self.file_tree.addTopLevelItem(node)
-                    else: parent_node.addChild(node)
+                    if parent_node is None:
+                        top_level_items.append(node)
+                    else:
+                        parent_node.addChild(node)
 
+        self.file_tree.addTopLevelItems(top_level_items) # Единовременная пакетная вставка
         self.file_tree.collapseAll() 
         
+        self.file_tree.setUpdatesEnabled(True) # Включаем перерисовку обратно
         self.file_tree.blockSignals(False)
 
     def handle_item_changed(self, item, column):
         self.file_tree.blockSignals(True)
+        self.file_tree.setUpdatesEnabled(False) # ОПТИМИЗАЦИЯ: Отключаем перерисовку при массовом выделении
         state = item.checkState(column)
         self._set_children_state(item, state)
         self._update_parent_state(item.parent())
+        self.file_tree.setUpdatesEnabled(True)
         self.file_tree.blockSignals(False)
 
     def _set_children_state(self, item, state):
@@ -449,10 +462,12 @@ class GitDialog(QDialog):
     def toggle_all_files(self, state):
         check_state = Qt.CheckState.Checked if state else Qt.CheckState.Unchecked
         self.file_tree.blockSignals(True)
+        self.file_tree.setUpdatesEnabled(False) # ОПТИМИЗАЦИЯ: Отключаем перерисовку при массовых кликах
         for i in range(self.file_tree.topLevelItemCount()):
             item = self.file_tree.topLevelItem(i)
             item.setCheckState(0, check_state)
             self._set_children_state(item, check_state)
+        self.file_tree.setUpdatesEnabled(True)
         self.file_tree.blockSignals(False)
 
     def load_remote_url(self):
@@ -525,7 +540,7 @@ class GitDialog(QDialog):
         self.btn_pull.setText("⬇️ Скачать всё")
         self.btn_pull.setEnabled(True)
         if success:
-            QMessageBox.information(self, "Успех", "✅ Код успешно скачан с GitHub!\n(Если у вас были открыты вкладки с файлами, переоткройте их).")
+            QMessageBox.information(self, "Успех", "✅ Код успешно скачан с GitHub!\n(Если у вас были открыты вкладки с files, переоткройте их).")
             self.parent_window.update_git_status()
             self.load_file_tree()
         else:
@@ -537,7 +552,7 @@ class GitDialog(QDialog):
             return
         selected_files = self.get_selected_files()
         if not selected_files:
-            QMessageBox.warning(self, "Ошибка", "Сначала поставьте галочки на файлах в дереве сверху!")
+            QMessageBox.warning(self, "Ошибка", "Сначала поставьте галочки на files в дереве сверху!")
             return
         reply = QMessageBox.question(self, "⚠️ Внимание", 
                                      f"Вы собираетесь перезаписать {len(selected_files)} файла(ов) версиями из GitHub.\nВаши локальные изменения в них будут потеряны.\n\nПродолжить?",
@@ -550,7 +565,7 @@ class GitDialog(QDialog):
         self.btn_pull_surgical.setText("🎯 Скачать выбранные")
         self.btn_pull_surgical.setEnabled(True)
         if success:
-            QMessageBox.information(self, "Успех", f"✅ {msg}\nПереоткройте эти файлы в редакторе.")
+            QMessageBox.information(self, "Успех", f"✅ {msg}\nПереоткройте эти files в редакторе.")
             self.parent_window.update_git_status()
             self.load_file_tree()
         else:

@@ -88,26 +88,52 @@ class GitManager:
 
     def get_diff_for_files(self, files):
         if not files: return ""
-        diff_files = []
+        
+        # ОПТИМИЗАЦИЯ: Пакетное добавление намерений (intent-to-add) для ускорения генерации описаний
+        to_add_intent = []
         for f in files:
             abs_path = os.path.join(self.project_path, f)
             if os.path.exists(abs_path):
-                self.run_git('add', '-N', '--force', '--', f)
-            diff_files.append(f)
+                to_add_intent.append(f)
+                
+        if to_add_intent:
+            chunk_size = 100
+            for i in range(0, len(to_add_intent), chunk_size):
+                chunk = to_add_intent[i:i + chunk_size]
+                self.run_git('add', '-N', '--force', '--', *chunk)
             
-        success, output = self.run_git('diff', '--', *diff_files)
+        success, output = self.run_git('diff', '--', *files)
         return output if success else ""
 
     def commit_selected(self, message, files):
         if not files: return False, "Не выбрано ни одного файла."
         self.run_git('reset')
+        
+        # ОПТИМИЗАЦИЯ: Разделение путей на существующие (add) и удаленные (rm)
+        to_add = []
+        to_rm = []
         for f in files:
             abs_path = os.path.join(self.project_path, f)
             if os.path.exists(abs_path):
-                add_success, add_err = self.run_git('add', '--force', '--', f)
-                if not add_success: return False, f"Ошибка добавления файла {f}: {add_err}"
+                to_add.append(f)
             else:
-                self.run_git('rm', '--cached', '--ignore-unmatch', '--', f)
+                to_rm.append(f)
+                
+        # Пакетное добавление файлов (партиями по 100 штук для обхода лимитов cmd в Windows)
+        if to_add:
+            chunk_size = 100
+            for i in range(0, len(to_add), chunk_size):
+                chunk = to_add[i:i + chunk_size]
+                add_success, add_err = self.run_git('add', '--force', '--', *chunk)
+                if not add_success:
+                    return False, f"Ошибка добавления файлов: {add_err}"
+                    
+        # Пакетное удаление файлов
+        if to_rm:
+            chunk_size = 100
+            for i in range(0, len(to_rm), chunk_size):
+                chunk = to_rm[i:i + chunk_size]
+                self.run_git('rm', '--cached', '--ignore-unmatch', '--', *chunk)
                 
         commit_success, commit_err = self.run_git('commit', '-m', message)
         if not commit_success: return False, f"Ошибка git commit: {commit_err}"
