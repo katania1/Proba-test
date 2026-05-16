@@ -22,7 +22,7 @@ startHeartbeat();
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === "force_fetch") {
         console.log("VibeCoder: Принудительный захват ответа по команде из IDE...");
-        sendLog("📥 Ручной перехват активирован. Извлекаю текст...", "#bb86fc");
+        sendLog("Ручной перехват активирован. Извлекаю текст...", "#bb86fc");
         setState({ stableCount: 0, currentCandidateText: "" });
         transition('READING');
         sendResponse({ success: true });
@@ -45,7 +45,7 @@ async function checkServer() {
     // Если ИИ долго "думает" над тяжелым контекстом (например, RAG), 
     // даем ему 60 секунд вместо 20, прежде чем сбросить сессию.
     if (state.fsmState !== 'IDLE' && getFsmElapsed() > 60000) {
-        sendLog(`⏰ Превышено время ожидания (60с). Сброс.`, '#ff4444');
+        sendLog(`Превышено время ожидания (60с). Сброс.`, '#ff4444');
         resetFsm();
         return;
     }
@@ -69,6 +69,13 @@ async function checkServer() {
                         setState({ knownServerSessionId: data.server_session_id });
                     }
 
+                    // 🔥 БЛОК ЗАЩИТЫ ОТ РАССИНХРОНА (State Desync Fix)
+                    // Если IDE на паузе, мы полностью прерываем цикл. 
+                    // Радар не будет сканировать мутации DOM после F5.
+                    if (data.status === "paused") {
+                        return;
+                    }
+
                     if (data.status === "success" && data.task) {
                         setState({ processingStartTime: Date.now() });
                         
@@ -83,7 +90,25 @@ async function checkServer() {
                                 waitStartTime: Date.now()
                             });
                             transition('WAITING_BUBBLE');
-                            sendLog("📡 Радар на связи! Жду вашего нажатия Enter...", "#bb86fc");
+                            sendLog("Радар на связи! Жду вашего нажатия Enter...", "#bb86fc");
+                            return;
+                        } else if (data.task.prompt === "___FORCE_FETCH___") {
+                            // 🔥 ФИКС БАГА РУЧНОГО ЗАХВАТА
+                            // Не печатаем команду в чат, а мгновенно считываем экран
+                            sendLog("Ручной перехват активирован. Извлекаю текст...", "#bb86fc");
+                            const currentText = getLastModelText();
+                            setState({ isProcessing: true });
+                            
+                            try {
+                                await fetchPostProxy(`${state.serverUrl}/post_result`, JSON.stringify({
+                                    task_id: data.task.id, result: currentText, source_id: state.tabId
+                                }));
+                                sendLog("Чтение завершено, отправляю текст в IDE...", "#31a24c");
+                            } catch (err) {
+                                console.error('VibeCoder: Ошибка отправки результата:', err);
+                            } finally {
+                                resetFsm(); // Сбрасываем конечный автомат в IDLE
+                            }
                             return;
                         } else {
                             setState({
@@ -112,7 +137,7 @@ async function checkServer() {
                         stableCount: 0
                     });
                     transition('READING');
-                    sendLog("📡 Засечена внезапная ручная генерация! Начинаем перехват ответа...", "#bb86fc");
+                    sendLog("Засечена внезапная ручная генерация! Начинаем перехват ответа...", "#bb86fc");
                     return;
                 }
                 break;
@@ -123,7 +148,7 @@ async function checkServer() {
                 // Если текст изменился — значит пузырь ответа появился или начал наполняться
                 if (currentText !== state.fsmSnapshotBeforeSend && currentText !== state.textBeforeSend) {
                     setState({ stableCount: 0, currentCandidateText: "" });
-                    sendLog("📡 Генерация пошла! Перехватываю ответ...", "#bb86fc");
+                    sendLog("Генерация пошла! Перехватываю ответ...", "#bb86fc");
                     transition('READING');
                 }
                 break;
@@ -162,7 +187,7 @@ async function checkServer() {
                     if (transition('POSTING')) {
                         setState({ isProcessing: true });
                         try {
-                            sendLog("📤 Чтение завершено, отправляю текст в IDE...", "#31a24c");
+                            sendLog("Чтение завершено, отправляю текст в IDE...", "#31a24c");
                             await fetchPostProxy(`${state.serverUrl}/post_result`, JSON.stringify({
                                 task_id: state.activeTaskId, result: currentText, source_id: state.tabId
                             }));

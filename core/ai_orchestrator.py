@@ -69,7 +69,10 @@ class AIOrchestrator:
         # --- ФИКС НЕВИДИМЫХ СИМВОЛОВ GEMINI ---
         json_str = json_str.replace('\xa0', ' ').replace('\u200b', '')
         
-        # --- ИНТЕЛЛЕКТУАЛЬНЫЙ ПРЕ-ПАРСЕР (FSM): Экранирование живых управляющих символов внутри строк ---
+        # ✅ ФИКС: Удаляем "висящие запятые" перед закрывающими скобками (Trailing Commas)
+        json_str = re.sub(r',\s*([\]}])', r'\1', json_str)
+        
+        # --- ИНТЕЛЛЕКТУАЛЬНЫЙ ПРЕ-ПАРСЕР (FSM) ---
         cleaned_chars = []
         in_string = False
         escape = False
@@ -93,9 +96,7 @@ class AIOrchestrator:
             else:
                 cleaned_chars.append(char)
         json_str = "".join(cleaned_chars)
-        # ------------------------------------------------------------------------------------------------
         
-        # Извлекаем текст ПОСЛЕ JSON (тот самый "хвост" с описанием структуры)
         extra_text = raw_text[end+1:].strip()
         
         try:
@@ -104,13 +105,10 @@ class AIOrchestrator:
             if not isinstance(data, dict):
                 return {"status": "error", "error_message": "Корневой элемент JSON должен быть объектом (dict)."}
             
-            # --- ФИКС ГИБРИДНОГО ОТВЕТА: Склеиваем мысли и лишний текст ---
             thoughts = data.get("thoughts", "")
             if extra_text:
                 data["thoughts"] = (thoughts + "\n\n" + extra_text).strip()
-            # ------------------------------------------------------------
 
-            # --- ФИКС ВСЕЯДНОГО ПАРСЕРА: СБОР НЕСТАНДАРТНЫХ ТЕКСТОВЫХ ПОЛЕЙ ---
             standard_keys = {"thoughts", "request_files", "create_files", "updates"}
             extra_thoughts = []
             for k, v in data.items():
@@ -120,7 +118,6 @@ class AIOrchestrator:
             if extra_thoughts:
                 combined_extra = "\n\n".join(extra_thoughts)
                 data["thoughts"] = (data.get("thoughts", "") + "\n\n" + combined_extra).strip()
-            # ------------------------------------------------------------------
 
             if "thoughts" not in data and "updates" not in data and "create_files" not in data:
                 dump = json.dumps(data, ensure_ascii=False, indent=2)
@@ -136,7 +133,11 @@ class AIOrchestrator:
             return {"status": "success", "data": data}
             
         except json.JSONDecodeError as e:
-            if "\"updates\": [" not in raw_text and "\"create_files\": [" not in raw_text:
+            # ✅ ФИКС: Умный Regex-поиск вместо жесткого поиска подстроки
+            has_updates = re.search(r'"updates"\s*:\s*\[', raw_text) is not None
+            has_create = re.search(r'"create_files"\s*:\s*\[', raw_text) is not None
+            
+            if not has_updates and not has_create:
                 return {
                     "status": "success", 
                     "data": {

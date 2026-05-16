@@ -14,6 +14,8 @@ class GenerationDetector {
         this.lastMutationTime = 0;
         this.staleThreshold = 4000; // 🔥 4000мс защиты от фризов Gemini
         this._ticker = null;
+        this.startupTime = Date.now(); // Фиксируем время старта детектора
+        this.warmupDuration = 3000; // 🔥 3 секунды "слепой зоны" при инициализации
     }
 
     start() {
@@ -48,6 +50,13 @@ class GenerationDetector {
             
             // Игнорируем мутации, пока мы сами вставляем текст
             if (fsmState === 'INJECTING') return;
+
+            // 🔥 БЛОК ЗАЩИТЫ ОТ РАССИНХРОНА (Blind Spot)
+            // Игнорируем любые мутации в первые 3 секунды после загрузки скрипта.
+            // Это предотвращает ложное срабатывание на рендеринг старой истории при нажатии F5.
+            if (Date.now() - this.startupTime < this.warmupDuration) {
+                return;
+            }
 
             const hasTextChange = mutations.some(m => {
                 if (m.type === 'attributes') return false;

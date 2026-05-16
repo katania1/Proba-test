@@ -115,7 +115,7 @@ export async function ensureProMode() {
 
     // Ликвидация тихого сбоя: закрываем меню, отправляем предупреждение и блокируем отправку не туда
     document.body.click();
-    sendLog('⚠️ Не удалось найти переключатель на Pro/Advanced модель в меню.', '#ffaa00');
+    sendLog('Не удалось найти переключатель на Pro/Advanced модель в меню.', '#ffaa00');
     return false;
 }
 
@@ -146,7 +146,7 @@ export async function sendToGemini(text, filesPayload = []) {
 
     const fieldSnapshot = (inputArea.innerText || inputArea.value || '').substring(0, 200);
     if (!fieldSnapshot.trim()) {
-        sendLog('❌ Поле ввода пустое перед отправкой. Задача не выполнена.', '#ff4444');
+        sendLog('Поле ввода пустое перед отправкой. Задача не выполнена.', '#ff4444');
         resetFsm();
         return;
     }
@@ -181,7 +181,7 @@ export async function sendToGemini(text, filesPayload = []) {
         );
         if (fallback) fallback.click();
         else {
-            sendLog('❌ Кнопка Send не найдена!', '#ff4444');
+            sendLog('Кнопка Send не найдена!', '#ff4444');
             resetFsm();
         }
     }

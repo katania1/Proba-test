@@ -36,6 +36,9 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("VibeCoder v1.28 — Pro IDE Edition")
         
+        # Включение отображения подсказок Tooltips без обязательного фокуса на окне
+        self.setAttribute(Qt.WidgetAttribute.WA_AlwaysShowToolTips, True)
+        
         self.settings = QSettings("VibeCoder", "Preferences")
         self.api_settings = QSettings("VibeCoder", "API_Config")
         
@@ -114,6 +117,9 @@ class MainWindow(QMainWindow):
         self.chat_history.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.chat_history.customContextMenuRequested.connect(self.chat_handler.show_chat_context_menu)
         
+        # Глобальный сброс отступов для абзацев и дивов (Фикс пустых строк)
+        self.chat_history.document().setDefaultStyleSheet("p, div, li { margin-top: 2px; margin-bottom: 2px; }")
+        
         chat_font = self.settings.value("chat_font_size", 12, type=int)
         self.chat_history.set_custom_font_size(chat_font)
         self.chat_history.zoom_changed.connect(lambda size: self.settings.setValue("chat_font_size", size))
@@ -142,57 +148,76 @@ class MainWindow(QMainWindow):
         input_layout.addWidget(self.prompt_input)
         input_layout.addWidget(self.attachment_panel) 
 
-        # --- КНОПКИ ДЕЙСТВИЙ ---
-        action_layout = QHBoxLayout()
+        # --- КНОПКИ ДЕЙСТВИЙ (Новый защищенный контейнер) ---
+        action_container = QWidget()
+        action_container.setMinimumWidth(100)  # Разрешаем сплиттеру сжимать панель
+        action_layout = QHBoxLayout(action_container)
         action_layout.setContentsMargins(5, 0, 5, 5)
         
+        # Уменьшен внутренний отступ кнопок (padding) до 6px
         def get_btn_style(bg, hover, pressed, color="white", border="none"):
             return f"""
-                QPushButton {{ background-color: {bg}; color: {color}; border: {border}; font-weight: bold; border-radius: 3px; padding: 4px 12px; font-size: 11px; margin-left: 5px; }}
+                QPushButton {{ background-color: {bg}; color: {color}; border: {border}; font-weight: bold; border-radius: 3px; padding: 4px 6px; font-size: 11px; margin-left: 5px; }}
                 QPushButton:hover {{ background-color: {hover}; }}
                 QPushButton:pressed {{ background-color: {pressed}; }}
             """
 
-        self.btn_inspector = QPushButton("🐞 Инспектор")
+        self.btn_inspector = QPushButton("🐞")
         self.btn_inspector.setFixedHeight(26)
+        self.btn_inspector.setFixedWidth(32)
         self.btn_inspector.setStyleSheet(get_btn_style("#005f73", "#007891", "#00404d"))
+        self.btn_inspector.setToolTip("Инспектор логов и трассировки")
         self.btn_inspector.clicked.connect(self.open_inspector)
 
-        self.btn_approve = QPushButton("✅ Утвердить код")
+        self.btn_approve = QPushButton("✅ Утвердить")
         self.btn_approve.setFixedHeight(26)
         self.btn_approve.setStyleSheet(get_btn_style("#2e7d32", "#388e3c", "#1b5e20"))
+        self.btn_approve.setToolTip("Применить предложенные изменения (ревью кода)")
         
         self.btn_reject_main = QPushButton("❌ Отклонить")
         self.btn_reject_main.setFixedHeight(26)
         self.btn_reject_main.setStyleSheet(get_btn_style("#512525", "#6b2f2f", "#3a1919"))
+        self.btn_reject_main.setToolTip("Отклонить изменения файлов и отменить патч")
         self.btn_reject_main.setVisible(False)
 
-        self.btn_pause = QPushButton("■ Пауза")
+        # Компактная кнопка ручного перехвата по схеме кнопки инспектора
+        self.btn_force_fetch = QPushButton("⏬")
+        self.btn_force_fetch.setFixedWidth(32)
+        self.btn_force_fetch.setFixedHeight(26)
+        self.btn_force_fetch.setStyleSheet(get_btn_style("#4527a0", "#512da8", "#311b92"))
+        self.btn_force_fetch.setToolTip("Принудительно считать текущий ответ от ИИ в браузере")
+        self.btn_force_fetch.clicked.connect(self.force_fetch_answer)
+
+        self.btn_pause = QPushButton('⏸ Пауза')
         self.btn_pause.setCheckable(True)
         self.btn_pause.setFixedHeight(26)
-        self.btn_pause.setStyleSheet("""
-            QPushButton { background-color: #d32f2f; color: white; border: none; font-weight: bold; border-radius: 3px; padding: 4px 12px; font-size: 11px; margin-left: 5px; }
-            QPushButton:hover { background-color: #e53935; }
-            QPushButton:checked { background-color: #31a24c; }
-        """)
+        self.btn_pause.setStyleSheet('''
+            QPushButton { background-color: #333333; color: #d4d4d4; border: 1px solid #555555; font-weight: bold; border-radius: 3px; padding: 4px 6px; font-size: 11px; margin-left: 5px; }
+            QPushButton:hover { background-color: #444444; }
+            QPushButton:checked { background-color: #d32f2f; color: white; border: none; }
+        ''')
+        self.btn_pause.setToolTip("Приостановить связь с браузером и сбросить очередь задач")
 
         self.btn_chat = QPushButton("💬 Спросить")
         self.btn_chat.setFixedHeight(26)
         self.btn_chat.setStyleSheet(get_btn_style("transparent", "rgba(86, 156, 214, 0.1)", "rgba(86, 156, 214, 0.25)", color="#569cd6", border="1px solid #569cd6"))
+        self.btn_chat.setToolTip("Легкий режим чата без RAG и JSON-парсинга")
 
         self.btn_code = VibeDragButton("⚡ Кодить", self)
         self.btn_code.setFixedHeight(26)
         self.btn_code.setStyleSheet(get_btn_style("#0e639c", "#1177bb", "#094771"))
+        self.btn_code.setToolTip("Тяжелый режим: отправка контекста (RAG) и применение кода (Smart Diff)")
 
         action_layout.addWidget(self.btn_inspector)
         action_layout.addStretch()
         action_layout.addWidget(self.btn_approve)
         action_layout.addWidget(self.btn_reject_main)
+        action_layout.addWidget(self.btn_force_fetch)
         action_layout.addWidget(self.btn_pause)
         action_layout.addWidget(self.btn_chat)
         action_layout.addWidget(self.btn_code)
 
-        input_layout.addLayout(action_layout)
+        input_layout.addWidget(action_container)
         chat_splitter.addWidget(input_container)
         chat_splitter.setSizes([600, 200])
         chat_layout.addWidget(chat_splitter)
@@ -370,7 +395,7 @@ class MainWindow(QMainWindow):
         
         self.proposed_updates = []
         self.btn_reject_main.setVisible(False)
-        self.btn_approve.setText("✅ Утвердить код")
+        self.btn_approve.setText("✅ Утвердить")
         self.attached_files.clear()
         self.prompt_input.highlighter.rehighlight()
         self.attachment_panel.clear()
@@ -437,11 +462,25 @@ class MainWindow(QMainWindow):
         if self.terminal.isVisible(): self.terminal.input_line.setFocus()
 
     def toggle_pause(self):
-        self.ai_controller.bridge.is_paused = self.btn_pause.isChecked()
-        self.log_system("⏸ ПАУЗА" if self.btn_pause.isChecked() else "▶ РАБОТА", color="#ffaa00" if self.btn_pause.isChecked() else "#31a24c", is_bold=True)
+        is_paused = self.btn_pause.isChecked()
+        self.ai_controller.bridge.is_paused = is_paused
+        if is_paused:
+            self.btn_pause.setText('▶ Продолжить')
+            self.log_system('Система на паузе. Очередь задач очищена.', color='#ffaa00', is_bold=False)
+            
+            if hasattr(self.ai_controller.bridge, 'clear_queue'):
+                self.ai_controller.bridge.clear_queue()
+        else:
+            self.btn_pause.setText('⏸ Пауза')
+            self.log_system('Работа возобновлена', color='#858585', is_bold=False)
 
     def show_history(self):
         HistoryDialog(self, self.chat_logger).exec()
+
+    def force_fetch_answer(self):
+        self.log_system("📥 Инициирован ручной перехват ответа...", color="#bb86fc", is_bold=True)
+        target = self.get_current_target_id()
+        self.ai_controller.bridge.add_task("___FORCE_FETCH___", target_id=target, images=[])
 
     # --- WRAPPERS FOR MANAGERS ---
     def log_system(self, text, color="#858585", is_bold=False):

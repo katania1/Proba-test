@@ -7,7 +7,8 @@ from PyQt6.QtGui import QDrag
 class DragFilesButton(QPushButton):
     """
     Умная кнопка для Гибридного Драг-энд-Дропа.
-    Вешает файлы на курсор, а в буфер обмена кладет короткую отбивку.
+    Вешает файлы на курсор, кладет в буфер обмена короткую отбивку
+    и ВЗВОДИТ РАДАР для приема ответа.
     """
     def __init__(self, text, file_paths, controller, parent_dialog):
         super().__init__(text, parent_dialog)
@@ -25,7 +26,6 @@ class DragFilesButton(QPushButton):
             drag = QDrag(self)
             mime_data = QMimeData()
             
-            # 1. Вешаем физические файлы на курсор мыши (QMimeData)
             urls = []
             for path in self.file_paths:
                 abs_path = os.path.abspath(os.path.join(self.controller.mw.project_path, path))
@@ -34,16 +34,22 @@ class DragFilesButton(QPushButton):
             mime_data.setUrls(urls)
             drag.setMimeData(mime_data)
             
-            # 2. В буфер кладем ТОЛЬКО короткий текст-заглушку (чтобы кнопка отправки стала активной)
-            # Никакого исходного кода, чтобы не засорять чат.
+            # 1. РЕГИСТРАЦИЯ ЗАДАЧИ: Говорим ядру, что ждем JSON, и создаем лог сессии
+            if hasattr(self.controller, 'register_drag_task'):
+                self.controller.register_drag_task("Автоматическая отправка запрошенных файлов (Hybrid Drag)")
+            
+            # 2. Текст-заглушка для отправки
             QApplication.clipboard().setText("Вот файлы, которые ты запрашивал для анализа.")
             
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             
-            # 3. Выполняем физический бросок в систему
+            # 3. Бросок файлов (Программа блокируется здесь)
             drag.exec(Qt.DropAction.CopyAction)
             
-            # Закрываем диалог (Reject означает, что мы отменили авто-отправку текстом)
+            # 4. АКТИВАЦИЯ РАДАРА: Файлы упали в браузер, запускаем таймер перехвата!
+            if hasattr(self.controller, 'activate_radar'):
+                self.controller.activate_radar()
+            
             self.parent_dialog.reject()
                 
         super().mouseMoveEvent(event)

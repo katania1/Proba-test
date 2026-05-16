@@ -101,7 +101,7 @@ class RagController:
         try:
             import chromadb
             chromadb.api.client.SharedSystemClient.clear_system_cache()
-            self.mw.log_system("🧹 [ChromaDB] Системный кэш векторов сброшен при очистке контроллера.")
+            self.mw.log_system("[ChromaDB] Системный кэш векторов сброшен при очистке контроллера.")
         except Exception:
             pass
 
@@ -119,7 +119,7 @@ class RagController:
                 return ""
                 
             embed_provider, _ = EmbeddingFactory.get_provider("Gemini")
-            self.mw.log_system("🔍 [RAG] Векторизация вопроса и поиск по кодовой базе...")
+            self.mw.log_system("[RAG] Векторизация вопроса и поиск по кодовой базе...")
             
             query_vector = embed_provider.get_embedding(user_text)
             results = db.search(query_vector, n_results=3)
@@ -137,11 +137,11 @@ class RagController:
                 rag_context += f"--- Файл: {file_path} (Совпадение #{i+1}) ---\n"
                 rag_context += f"{marker}python\n{res['text']}\n{marker}\n\n"
 
-            self.mw.log_system(f"🧠 [RAG] Найдено {len(results)} релевантных фрагментов.")
+            self.mw.log_system(f"[RAG] Найдено {len(results)} релевантных фрагментов.")
             return rag_context
 
         except Exception as e:
-            self.mw.log_system(f"⚠️ Ошибка RAG-поиска: {str(e)}", color="#ffaa00")
+            self.mw.log_system(f"Ошибка RAG-поиска: {str(e)}", color="#ffaa00")
             return ""
 
     def setup_watcher(self):
@@ -229,7 +229,7 @@ class RagController:
     def _on_silent_rag_error(self, err_msg):
         self.mw.btn_rag.setText("🧠 RAG (Индекс)")
         self.mw.btn_rag.setStyleSheet("background-color: #00838f; color: white; font-weight: bold; border-radius: 4px; padding: 0 10px;")
-        self.mw.log_system(f"⚠️ [RAG] Фоновое обновление прервано: {err_msg}", color="#ffaa00")
+        self.mw.log_system(f"[RAG] Фоновое обновление прервано: {err_msg}", color="#ffaa00")
         self.mw.status_bar.showMessage("⚠️ RAG: Ошибка фонового обновления")
 
     def _on_indexer_progress(self, current, total, filename):

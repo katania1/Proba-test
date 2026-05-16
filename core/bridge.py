@@ -205,6 +205,17 @@ class VibeBridge:
             self.task_queue.append(task)
             self.task_counter += 1
 
+    # --- НОВЫЙ МЕТОД: Очистка очереди и буфера при Паузе ---
+    def clear_queue(self):
+        """Полностью очищает очередь задач и виртуальный буфер (предотвращает появление старых сообщений после паузы)"""
+        with self.lock:
+            if self.task_queue:
+                logging.info(f"Очистка очереди задач (удалено {len(self.task_queue)} шт.)")
+                self.task_queue.clear()
+            
+            self.pending_clipboard_text = ""
+            self.pending_clipboard_time = 0
+
     def start_server(self):
         """Фоновый запуск Flask-приложения в отдельном демоническом потоке"""
         thread = threading.Thread(

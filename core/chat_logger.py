@@ -15,13 +15,14 @@ class ChatLogger:
             with open(self.log_file, 'w', encoding='utf-8') as f:
                 json.dump([], f)
 
-    def log(self, role, content, hidden_data=""):
+    def log(self, role, content, hidden_data="", trace_id=None):
         entry = {
             "id": str(uuid.uuid4()),
             "timestamp": time.time(),
             "role": role,
             "content": content,
-            "hidden_data": hidden_data
+            "hidden_data": hidden_data,
+            "trace_id": trace_id
         }
         
         try:
@@ -44,11 +45,13 @@ class ChatLogger:
                 for log in logs:
                     if log.get("id") == log_id:
                         return log
-        except: pass
+        except:
+            pass
         return None
         
     def get_all(self):
         try:
             with open(self.log_file, 'r', encoding='utf-8') as f:
                 return json.load(f)
-        except: return []
+        except:
+            return []

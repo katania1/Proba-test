@@ -152,13 +152,22 @@ class ContextBuilder:
 
                 tree_text = self._get_project_tree()
                 
+                # 🔥 ФИКС ИИ-ЛЕНТЯЯ: Железобетонный ультиматум в самом конце промпта
+                strict_reminder = (
+                    "\n\n[🚨 КРИТИЧЕСКОЕ СИСТЕМНОЕ НАПОМИНАНИЕ: ТЫ НАХОДИШЬСЯ В РЕЖИМЕ КОДИНГА! "
+                    "Актуальная структура файлов представлена выше. База знаний (RAG) прикреплена как файл. "
+                    "ВНИМАНИЕ: Даже если пользователь просто задает вопрос или анализирует код без изменения файлов, "
+                    "ТЫ ОБЯЗАН ответить СТРОГО валидным JSON-объектом. Свои мысли и текстовые ответы пиши в поле \"thoughts\", "
+                    "а массивы файлов оставляй пустыми. ОТВЕТЫ ОБЫЧНЫМ ТЕКСТОМ (MARKDOWN) СТРОГО ЗАПРЕЩЕНЫ И СЛОМАЮТ СИСТЕМУ!]"
+                )
+
                 final_prompt_text = (
                     core_rules + 
                     status_block + 
                     tree_text + 
                     "\n\n=== ЗАДАЧА ПОЛЬЗОВАТЕЛЯ ===\n" + 
                     enriched_user_text + 
-                    "\n\n[СИСТЕМНОЕ НАПОМИНАНИЕ: Актуальная структура файлов и папок проекта представлена выше в тексте. База знаний (RAG) прикреплена в виде файла rag_context.txt. Отвечай СТРОГО в формате JSON Оркестратора.]"
+                    strict_reminder
                 )
             else:
                 # ИНТЕГРАЦИЯ: В режиме чата ИИ получает абсолютно чистый и легкий промпт без MCP
@@ -181,7 +190,16 @@ class ContextBuilder:
             
             if is_coding_mode:
                 tree_text = self._get_project_tree()
-                full_api_prompt = enriched_text + "\n\n" + tree_text
+                
+                # 🔥 ФИКС ИИ-ЛЕНТЯЯ для прямого API
+                strict_reminder = (
+                    "\n\n[🚨 КРИТИЧЕСКОЕ СИСТЕМНОЕ НАПОМИНАНИЕ: ТЫ НАХОДИШЬСЯ В РЕЖИМЕ КОДИНГА! "
+                    "ВНИМАНИЕ: Даже если пользователь просто задает вопрос без изменения файлов, "
+                    "ТЫ ОБЯЗАН ответить СТРОГО валидным JSON-объектом. Свои мысли и ответы пиши в поле \"thoughts\", "
+                    "а массивы файлов оставляй пустыми. ОТВЕТЫ ОБЫЧНЫМ ТЕКСТОМ ЗАПРЕЩЕНЫ!]"
+                )
+
+                full_api_prompt = enriched_text + "\n\n" + tree_text + strict_reminder
                 
                 final_prompt_text = self.ctrl.orchestrator.format_request(user_prompt=full_api_prompt, project_path=self.mw.project_path, current_file_path=self.mw.current_file_path, file_content="")
                 api_sys_prompt = self.ctrl.orchestrator.system_prompt

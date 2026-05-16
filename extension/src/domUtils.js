@@ -100,13 +100,13 @@ export async function insertLargeTextChunked(inputArea, text) {
         el.dispatchEvent(new Event('input', { bubbles: true }));
         await new Promise(r => setTimeout(r, 50));
 
-        sendLog('⚡ Промпт загружен мгновенно (Fast-Track).', '#bb86fc');
+        sendLog('Промпт загружен мгновенно (Fast-Track).', '#bb86fc');
         el.focus();
         return;
     }
 
     console.log('VibeCoder: Объем > 4КБ. Запуск анти-фриз инжектора...');
-    sendLog('⚡ Загрузка объемного контекста безопасными блоками...', '#bb86fc');
+    sendLog('Загрузка объемного контекста безопасными блоками...', '#bb86fc');
 
     const injector = new TurboTextInjector({
         currentChunkSize: 3500,
@@ -120,7 +120,7 @@ export async function insertLargeTextChunked(inputArea, text) {
     await injector.inject(el, text);
 
     setState({ fsmState: getState().fsmState }); 
-    sendLog('✅ Вставка контекста успешно завершена.', '#31a24c');
+    sendLog('Вставка контекста успешно завершена.', '#31a24c');
     el.focus();
 }
 

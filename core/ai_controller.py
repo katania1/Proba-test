@@ -1,6 +1,6 @@
 import os
 import uuid
-from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QObject, pyqtSignal, QTimer
 from PyQt6.QtWidgets import QMessageBox, QApplication
 
 from core.ai_orchestrator import AIOrchestrator
@@ -8,7 +8,6 @@ from core.bridge import VibeBridge
 from core.mcp_manager import MCPManager
 from core.context_builder import ContextBuilder
 
-# Импортируем сервисы рефакторинга (SOLID)
 from core.trace_manager import TraceManager
 from core.mcp_handler import MCPHandler
 from core.prompt_service import PromptService
@@ -17,11 +16,6 @@ from core.api_execution_manager import APIExecutionManager
 
 
 class AIController(QObject):
-    """
-    Главный AI-Диспетчер (Оркестратор).
-    Очищенная версия: управляет исключительно потоками данных между UI,
-    браузерным мостом (VibeBridge), сборщиком контекста и исполнительными сервисами.
-    """
     ai_response_signal = pyqtSignal(str)
     limit_reached_signal = pyqtSignal()
     bridge_log_signal = pyqtSignal(str, str)
@@ -29,26 +23,21 @@ class AIController(QObject):
     def __init__(self, main_window):
         super().__init__()
         self.mw = main_window
-
-        # Базовые сервисы ядра
         self.orchestrator = AIOrchestrator()
         self.bridge = VibeBridge()
         self.mcp_manager = MCPManager(self.mw.project_path)
         self.context_builder = ContextBuilder(self)
 
-        # Инициализация делегированных хэндлеров (SRP)
         self.trace_manager = TraceManager(self.mw.project_path)
         self.mcp_handler = MCPHandler(self)
         self.prompt_service = PromptService(self)
         self.file_ops_handler = FileOpsHandler(self)
         self.api_execution_manager = APIExecutionManager(self)
 
-        # Подписка на события моста
         self.bridge.on_result_received = lambda text: self.ai_response_signal.emit(text)
         self.bridge.on_limit_reached = lambda: self.limit_reached_signal.emit()
         self.bridge.on_log_received = lambda msg, color="": self.bridge_log_signal.emit(msg, color)
 
-        # Внутренний роутинг сигналов
         self.ai_response_signal.connect(self.process_ai_response)
         self.limit_reached_signal.connect(self.process_limit_reached)
         self.bridge_log_signal.connect(self.process_bridge_log)
@@ -58,7 +47,6 @@ class AIController(QObject):
         self.is_waiting_for_relay_msg = False
         self.current_mode_is_chat = False
 
-    # --- Прозрачная переадресация свойств для UI ---
     @property
     def agent_trace(self):
         return self.trace_manager.agent_trace
@@ -93,34 +81,36 @@ class AIController(QObject):
 
     def register_drag_task(self, full_prompt):
         trace_id = str(uuid.uuid4())[:12]
+        self.current_trace_id = trace_id 
         self.trace_manager.start_new_trace(trace_id, "Исходный запрос (Hybrid Drag)", full_prompt)
+        
+        if hasattr(self, '_save_current_trace'):
+            self._save_current_trace()
 
         self.retry_count = 0
         self.mcp_handler.reset_state()
-
-        # 🔥 ФИКС: Принудительно отключаем режим чата для гибридного драга
         self.current_mode_is_chat = False
-
-        log_func = self.mw.chat_handler.log_system if hasattr(self.mw, 'chat_handler') else self.mw.log_system
-        log_func("📡 Синхронизация радара. Отправка команды в браузер...", color="#858585")
-
-        target = self.mw.get_current_target_id()
-        # Гарантируем наличие пустого списка images=[] для защиты от Null-Pointer в JS
-        self.bridge.add_task("___RADAR_MODE___", target_id=target, images=[])
-
         return trace_id
+
+    def activate_radar(self):
+        log_func = self.mw.chat_handler.log_system if hasattr(self.mw, 'chat_handler') else self.mw.log_system
+        log_func("Синхронизация радара. Ожидание ответа ИИ...", color="#858585")
+        target = self.mw.get_current_target_id()
+        self.bridge.add_task("___RADAR_MODE___", target_id=target, images=[])
 
     def handle_terminal_error(self, error_text):
         engine_data = self.mw.get_selected_engine_data()
         is_browser = engine_data.get("provider_id", "Browser") == "Browser"
 
-        self.mw.chat_logger.log("SYSTEM", f"Перехват ошибки терминала:\n{error_text}")
-
         trace_id = str(uuid.uuid4())[:12]
         self.current_trace_id = trace_id
+        self.mw.chat_logger.log("SYSTEM", f"Перехват ошибки терминала:\n{error_text}", trace_id=trace_id)
 
         ui_alert = self.prompt_service.build_terminal_error_alert(error_text, trace_id)
-        self.mw.chat_history.append(ui_alert)
+        if hasattr(self.mw, 'chat_handler'):
+            self.mw.chat_handler.append_html(ui_alert)
+        else:
+            self.mw.chat_history.append(ui_alert)
 
         if hasattr(self.mw, 'chat_handler'):
             self.mw.chat_handler.scroll_chat()
@@ -128,7 +118,6 @@ class AIController(QObject):
             self.mw.scroll_chat()
 
         system_text = self.prompt_service.build_terminal_error_prompt(error_text)
-
         self.mcp_handler.reset_state()
         self.trace_manager.start_new_trace(trace_id, "Перехват ошибки терминала", system_text)
 
@@ -137,14 +126,11 @@ class AIController(QObject):
             self.mw.tokens_sent += self.estimate_tokens(self.mw.last_full_prompt)
             self.mw.update_status_bar()
             self.retry_count = 0
-            # Гарантируем наличие пустого списка images=[]
             self.bridge.add_task(self.mw.last_full_prompt, target_id=self.mw.get_current_target_id(), images=[])
         else:
             self.mw.last_full_prompt = self.orchestrator.format_request(
-                user_prompt=system_text,
-                project_path=self.mw.project_path,
-                current_file_path=self.mw.current_file_path,
-                file_content=""
+                user_prompt=system_text, project_path=self.mw.project_path,
+                current_file_path=self.mw.current_file_path, file_content=""
             )
             self.mw.tokens_sent += self.estimate_tokens(self.mw.last_full_prompt)
             self.mw.update_status_bar()
@@ -157,7 +143,6 @@ class AIController(QObject):
             return
 
         trace_id = str(uuid.uuid4())[:12]
-
         engine_data = self.mw.get_selected_engine_data()
         provider_id = engine_data.get("provider_id", "Browser")
         selected_model = engine_data.get("model", "")
@@ -174,25 +159,27 @@ class AIController(QObject):
             return
 
         self.mcp_handler.reset_state()
-
-        # 🔥 СОХРАНЯЕМ РЕЖИМ РАБОТЫ (Чат или Кодинг) ДЛЯ ПРИЕМА ОТВЕТА
         self.current_mode_is_chat = not is_coding_mode
 
         payload = self.context_builder.build_payload(user_text, is_coding_mode, is_browser)
         self.mw.last_full_prompt = payload["text"]
-
-        self.mw.chat_logger.log("USER", user_text)
+        self.mw.chat_logger.log("USER", user_text, trace_id=trace_id)
+        
         tab_display_name = selected_tab.split(" [")[0].replace("🟢 ", "") if is_browser else selected_model
         media_notice = f" <i>(+ {len(payload['image_paths'])} картинки)</i>" if payload['image_paths'] else ""
         mode_notice = "⚡ Кодинг" if is_coding_mode else "💬 Чат"
 
-        self.mw.chat_history.append(f"<br><span style='color: #569cd6;'><a href='trace://{trace_id}' style='color: #569cd6; text-decoration: none;'><b>ВЫ</b></a> [{mode_notice}] (в <i>{tab_display_name}</i>){media_notice}<b>:</b> {user_text}</span>")
+        if hasattr(self.mw, 'chat_handler'):
+            self.mw.chat_handler.append_html(f"<span style='color: #569cd6;'><a href='trace://{trace_id}' style='color: #569cd6; text-decoration: none;'><b>ВЫ</b></a> [{mode_notice}] (в <i>{tab_display_name}</i>){media_notice}<b>:</b> {user_text}</span><br>")
+        else:
+            self.mw.chat_history.append(f"<div style='margin-top: 2px; margin-bottom: 2px;'><span style='color: #569cd6;'><a href='trace://{trace_id}' style='color: #569cd6; text-decoration: none;'><b>ВЫ</b></a> [{mode_notice}] (в <i>{tab_display_name}</i>){media_notice}<b>:</b> {user_text}</span></div>")
 
         if hasattr(self.mw, 'chat_handler'):
             self.mw.chat_handler.scroll_chat()
         else:
             self.mw.scroll_chat()
 
+        self.current_trace_id = trace_id 
         self.trace_manager.start_new_trace(trace_id, f"Исходный запрос ({mode_notice})", self.mw.last_full_prompt)
 
         self.mw.tokens_sent += self.estimate_tokens(self.mw.last_full_prompt)
@@ -209,16 +196,14 @@ class AIController(QObject):
             self.execute_api_task(provider_id, selected_model, payload["image_paths"], payload["api_sys_prompt"])
 
     def execute_api_task(self, provider_id, selected_model, image_paths=None, sys_prompt=""):
-        """Делегирует запуск сетевых запросов Фабрике API"""
         self.api_execution_manager.execute(provider_id, selected_model, image_paths, sys_prompt)
 
     def request_ai_commit_message(self, diff_text):
         self.is_waiting_for_commit_msg = True
         prompt = self.prompt_service.build_commit_message_prompt(diff_text)
-
         log_func = self.mw.chat_handler.log_system if hasattr(self.mw, 'chat_handler') else self.mw.log_system
         log_func("Запрос ИИ-коммита...")
-        self.mw.chat_history.append("<br><span style='color: #673ab7;'><b>[СИСТЕМА] Отправка diff для генерации ИИ-коммита...</b></span>")
+        log_func("Отправка diff для генерации ИИ-коммита...", color="#673ab7")
 
         if hasattr(self.mw, 'chat_handler'):
             self.mw.chat_handler.scroll_chat()
@@ -234,7 +219,6 @@ class AIController(QObject):
         self.retry_count = 0
 
         if is_browser:
-            # ИСПРАВЛЕНИЕ: Явно передаем images=[] для предотвращения падения content.js
             self.bridge.add_task(self.mw.last_full_prompt, target_id=self.mw.get_current_target_id(), images=[])
         else:
             self.execute_api_task(engine_data.get("provider_id"), engine_data.get("model"), sys_prompt="Ты — профессиональный программист, генерирующий идеальные коммиты.")
@@ -242,10 +226,9 @@ class AIController(QObject):
     def force_relay(self):
         self.is_waiting_for_relay_msg = True
         prompt = self.prompt_service.build_force_relay_prompt()
-
         log_func = self.mw.chat_handler.log_system if hasattr(self.mw, 'chat_handler') else self.mw.log_system
         log_func("Запрос транзитного пакета у ИИ...")
-        self.mw.chat_history.append("<br><span style='color: #005f73;'><b>[СИСТЕМА] Сбор Транзитного Пакета (эстафеты)...</b></span>")
+        log_func("Сбор Транзитного Пакета (эстафеты)...", color="#005f73")
 
         if hasattr(self.mw, 'chat_handler'):
             self.mw.chat_handler.scroll_chat()
@@ -256,10 +239,9 @@ class AIController(QObject):
         self.mw.tokens_sent += self.estimate_tokens(self.mw.last_full_prompt)
         self.mw.update_status_bar()
         self.retry_count = 0
-
+        
         engine_data = self.mw.get_selected_engine_data()
         if engine_data.get("provider_id") == "Browser":
-            # ИСПРАВЛЕНИЕ: Явно передаем images=[]
             self.bridge.add_task(self.mw.last_full_prompt, target_id=self.mw.get_current_target_id(), images=[])
         else:
             self.execute_api_task(engine_data.get("provider_id"), engine_data.get("model"), sys_prompt="Ты — координатор проекта. Формируй брифы четко.")
@@ -268,8 +250,9 @@ class AIController(QObject):
         engine_data = self.mw.get_selected_engine_data()
         is_browser = engine_data.get("provider_id", "Browser") == "Browser"
 
-        self.mw.chat_logger.log("SYSTEM", f"Авто-отправка файлов: {', '.join(file_paths)}")
-        self.mw.chat_history.append(f"<br><div style='color: #858585; font-size: 13px; margin-left: 10px;'>[СИСТЕМА] Автоматически отправлен код: {', '.join(file_paths)}</div>")
+        self.mw.chat_logger.log("SYSTEM", f"Авто-отправка файлов: {', '.join(file_paths)}", trace_id=self.current_trace_id)
+        log_func = self.mw.chat_handler.log_system if hasattr(self.mw, 'chat_handler') else self.mw.log_system
+        log_func(f"Автоматически отправлен код: {', '.join(file_paths)}")
 
         if hasattr(self.mw, 'chat_handler'):
             self.mw.chat_handler.scroll_chat()
@@ -283,7 +266,6 @@ class AIController(QObject):
             self.mw.tokens_sent += self.estimate_tokens(self.mw.last_full_prompt)
             self.mw.update_status_bar()
             self.retry_count = 0
-
             self.bridge.add_task(self.mw.last_full_prompt, target_id=self.mw.get_current_target_id(), images=[])
             log_func = self.mw.chat_handler.log_system if hasattr(self.mw, 'chat_handler') else self.mw.log_system
             log_func("Текст файлов отправлен в чат. Ожидание ответа...")
@@ -300,11 +282,10 @@ class AIController(QObject):
             self.mw.toggle_pause()
 
         log_func = self.mw.chat_handler.log_system if hasattr(self.mw, 'chat_handler') else self.mw.log_system
-        log_func("🚨 Внимание: Получен сигнал об изменении лимитов Gemini!", color="#ffaa00", is_bold=True)
+        log_func("Внимание: Получен сигнал об изменении лимитов Gemini!", color="#ffaa00")
         msg = QMessageBox(self.mw)
         msg.setWindowTitle("⚠️ Лимиты Gemini Pro")
         msg.setText("Похоже, лимиты продвинутой версии (Pro) исчерпаны, и чат перешел на быструю version (Flash).\n\nЧто делаем дальше?")
-
         btn_relay = msg.addButton("🔄 Собрать Эстафету", QMessageBox.ButtonRole.AcceptRole)
         btn_continue = msg.addButton("⚡ Продолжить на Flash", QMessageBox.ButtonRole.RejectRole)
         msg.setStyleSheet("QMessageBox { background-color: #252526; color: #d4d4d4; } QLabel { color: #d4d4d4; font-size: 13px; } QPushButton { background-color: #0e639c; color: white; padding: 6px 20px; border-radius: 4px; font-weight: bold; } QPushButton:hover { background-color: #1177bb; }")
@@ -336,11 +317,11 @@ class AIController(QObject):
                 return
 
             mega_prompt = self.prompt_service.build_relay_mega_prompt(ai_summary)
-
             clipboard = QApplication.clipboard()
             clipboard.setText(mega_prompt)
 
-            self.mw.chat_history.append("<span style='color: #31a24c;'><b>[СИСТЕМА] Транзитный пакет успешно скопирован в буфер обмена!</b></span>")
+            log_func = self.mw.chat_handler.log_system if hasattr(self.mw, 'chat_handler') else self.mw.log_system
+            log_func("Транзитный пакет успешно скопирован в буфер обмена!", color="#31a24c")
             if hasattr(self.mw, 'chat_handler'):
                 self.mw.chat_handler.scroll_chat()
             else:
@@ -359,8 +340,12 @@ class AIController(QObject):
                 commit_msg = "Автоматический коммит (не удалось распарсить ответ ИИ)"
 
             safe_msg = commit_msg.replace('<', '&lt;').replace('>', '&gt;').replace('\n', '<br>')
-            self.mw.chat_history.append(f"<br><span style='color: #4CAF50;'><b>[ИИ-Коммит]:</b><br>{safe_msg}</span>")
-            self.mw.chat_logger.log("AI", f"Сгенерирован коммит:\n{commit_msg}")
+            if hasattr(self.mw, 'chat_handler'):
+                self.mw.chat_handler.append_html(f"<span style='color: #4CAF50;'><b>ИИ-Коммит:</b><br>{safe_msg}</span><br>")
+            else:
+                self.mw.chat_history.append(f"<div style='margin-top: 2px; margin-bottom: 2px; color: #4CAF50;'><b>ИИ-Коммит:</b><br>{safe_msg}</div>")
+                
+            self.mw.chat_logger.log("AI", f"Сгенерирован коммит:\n{commit_msg}", trace_id=self.current_trace_id)
 
             if hasattr(self.mw, 'chat_handler'):
                 self.mw.chat_handler.scroll_chat()
@@ -381,22 +366,26 @@ class AIController(QObject):
         step_suffix = f" (Шаг {self.mcp_handler.browser_mcp_step + 1})" if self.mcp_handler.browser_mcp_step > 0 else ""
         self.trace_manager.append_step(f"Ответ от ИИ{step_suffix}", raw_text)
 
-        # 🔥 НОВОЕ ПРАВИЛО: БАЙПАС ПАРСЕРОВ ДЛЯ РЕЖИМА "ЧАТ"
         if getattr(self, 'current_mode_is_chat', False):
             self.retry_count = 0
             if raw_text.strip():
-                self.mw.chat_logger.log("AI", raw_text)
+                self.mw.chat_logger.log("AI", raw_text, trace_id=self.current_trace_id)
                 formatted_thoughts = self.orchestrator.markdown_to_html(raw_text.strip())
-                self.mw.chat_history.append(f"<div style='margin-top: 10px; margin-bottom: 10px;'><b style='color: #31a24c;'>[ОТВЕТ ИИ]:</b><br>{formatted_thoughts}</div>")
+                if hasattr(self.mw, 'chat_handler'):
+                    self.mw.chat_handler.append_html(f"<span style='color: #31a24c;'><b>ОТВЕТ ИИ:</b></span><br>{formatted_thoughts}<br>")
+                else:
+                    self.mw.chat_history.append(f"<div style='margin-top: 2px; margin-bottom: 2px;'><span style='color: #31a24c;'><b>ОТВЕТ ИИ:</b></span><br>{formatted_thoughts}</div>")
             else:
-                self.mw.chat_history.append("<div style='margin-top: 10px; margin-bottom: 10px;'><b style='color: #ff4444;'>[ОШИБКА]:</b> Браузер прислал пустой текст. Gemini изменил дизайн.</div>")
+                if hasattr(self.mw, 'chat_handler'):
+                    self.mw.chat_handler.append_html("<span style='color: #ff4444;'><b>ОШИБКА:</b></span> Браузер прислал пустой текст. Gemini изменил дизайн.<br>")
+                else:
+                    self.mw.chat_history.append("<div style='margin-top: 2px; margin-bottom: 2px;'><span style='color: #ff4444;'><b>ОШИБКА:</b></span> Браузер прислал пустой текст. Gemini изменил дизайн.</div>")
             
             if hasattr(self.mw, 'chat_handler'):
                 self.mw.chat_handler.scroll_chat()
             else:
                 self.mw.scroll_chat()
             return
-        # ----------------------------------------------------
 
         marker = '`' * 3
         clean_result_mcp = raw_text.replace(f'{marker}json', '').replace(marker, '').strip()
@@ -405,27 +394,13 @@ class AIController(QObject):
         engine_data = self.mw.get_selected_engine_data()
         is_browser = engine_data.get("provider_id", "Browser") == "Browser"
 
-        # Делегирование выполнения MCP инструмента
         if is_browser and command and isinstance(command, dict) and "tool" in command and "updates" not in command:
             self.mcp_handler.handle_tool_command(command)
             return
 
-        # Передаем оригинальный сырой текст напрямую в парсер,
-        # без предварительной обрезки "грязным пылесосом"
         result = self.orchestrator.parse_and_validate_response(raw_text)
 
         if result["status"] == "error":
-            # Если парсер не нашел обязательных полей кодинга, считаем это обычным чатом
-            if "\"updates\":" not in raw_text and "\"create_files\":" not in raw_text:
-                formatted_thoughts = self.orchestrator.markdown_to_html(raw_text.strip())
-                self.mw.chat_history.append(f"<div style='margin-top: 10px; margin-bottom: 10px;'><b style='color: #31a24c;'>[ОТВЕТ ИИ]:</b><br>{formatted_thoughts}</div>")
-
-                if hasattr(self.mw, 'chat_handler'):
-                    self.mw.chat_handler.scroll_chat()
-                else:
-                    self.mw.scroll_chat()
-                return
-
             self.retry_count += 1
             if self.retry_count > 2:
                 log_func = self.mw.chat_handler.log_system if hasattr(self.mw, 'chat_handler') else self.mw.log_system
@@ -442,57 +417,63 @@ class AIController(QObject):
             fix_prompt = self.prompt_service.build_json_fix_prompt(result['error_message'])
             self.trace_manager.append_step(f"Авто-исправление ошибки (Попытка {self.retry_count})", fix_prompt)
 
-            if engine_data.get("provider_id") == "Browser":
-                self.bridge.add_task(fix_prompt, target_id=self.mw.get_current_target_id())
-            else:
-                old_prompt = self.mw.last_full_prompt
-                self.mw.last_full_prompt = fix_prompt
-                self.execute_api_task(engine_data.get("provider_id"), engine_data.get("model"))
-                self.mw.last_full_prompt = old_prompt
+            def send_delayed_fix():
+                if engine_data.get("provider_id") == "Browser":
+                    self.bridge.add_task(fix_prompt, target_id=self.mw.get_current_target_id())
+                else:
+                    old_prompt = self.mw.last_full_prompt
+                    self.mw.last_full_prompt = fix_prompt
+                    self.execute_api_task(engine_data.get("provider_id"), engine_data.get("model"))
+                    self.mw.last_full_prompt = old_prompt
+                if hasattr(self.mw, 'chat_handler'):
+                    self.mw.chat_handler.scroll_chat()
+                else:
+                    self.mw.scroll_chat()
+
+            QTimer.singleShot(2500, send_delayed_fix)
+            return
         else:
             self.retry_count = 0
             data = result["data"]
             thoughts = data.get('thoughts', '')
-            self.mw.chat_logger.log("AI", thoughts)
+            self.mw.chat_logger.log("AI", thoughts, trace_id=self.current_trace_id)
 
             if thoughts:
                 formatted_thoughts = self.orchestrator.markdown_to_html(thoughts)
-                self.mw.chat_history.append(f"<div style='margin-top: 10px; margin-bottom: 10px;'><b style='color: #31a24c;'>[МЫСЛИ ИИ]:</b><br>{formatted_thoughts}</div>")
+                if hasattr(self.mw, 'chat_handler'):
+                    self.mw.chat_handler.append_html(f"<span style='color: #31a24c;'><b>МЫСЛИ ИИ:</b></span><br>{formatted_thoughts}<br>")
+                else:
+                    self.mw.chat_history.append(f"<div style='margin-top: 2px; margin-bottom: 2px;'><span style='color: #31a24c;'><b>МЫСЛИ ИИ:</b></span><br>{formatted_thoughts}</div>")
 
             requested_files = data.get("request_files", [])
             if requested_files:
-                self.mw.chat_history.append(f"<span style='color: #e6a822;'><b>[ИИ ЗАПРАШИВАЕТ ФАЙЛЫ]:</b> {', '.join(requested_files)}</span>")
+                if hasattr(self.mw, 'chat_handler'):
+                    self.mw.chat_handler.append_html(f"<span style='color: #e6a822;'><b>ИИ ЗАПРАШИВАЕТ ФАЙЛЫ:</b> {', '.join(requested_files)}</span><br>")
+                else:
+                    self.mw.chat_history.append(f"<div style='margin-top: 2px; margin-bottom: 2px;'><span style='color: #e6a822;'><b>ИИ ЗАПРАШИВАЕТ ФАЙЛЫ:</b> {', '.join(requested_files)}</span></div>")
 
                 if hasattr(self.mw, 'chat_handler'):
                     self.mw.chat_handler.scroll_chat()
                 else:
                     self.mw.scroll_chat()
 
-                # --- НОВЫЙ ВЫЗОВ УМНОГО ДИАЛОГА ---
                 from core.request_files_dialog import RequestedFilesDialog
                 from PyQt6.QtWidgets import QDialog
                 
                 dlg = RequestedFilesDialog(self, requested_files, self.mw)
                 
-                # Если нажали "Отправить текстом (Авто)" - вернется Accepted
                 if dlg.exec() == QDialog.DialogCode.Accepted:
                     self.send_requested_files(requested_files)
-                    
-                # В случае Драг-энд-Дропа диалог закроется сам (Rejected), 
-                # и мы просто прерываем текущий цикл, так как задача уже улетела через браузер
                 return
 
-            # Делегирование физических операций с файловой системой
             create_files = data.get("create_files", [])
             if create_files:
                 self.file_ops_handler.process_created_files(create_files)
 
             proposed_updates = data.get("updates", [])
             if proposed_updates:
-                # Накатывание диффов и валидация через FileOpsHandler
                 valid_updates = self.file_ops_handler.process_proposed_updates(proposed_updates, engine_data)
                 
-                # Если вернулся None, значит произошла ошибка парсинга Smart Diff и запущен цикл переделки
                 if valid_updates is None:
                     return
 
